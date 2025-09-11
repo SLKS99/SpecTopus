@@ -282,7 +282,7 @@ def assess_fitting_quality(fit_result: PeakFitResult) -> Dict[str, str]:
     elif fit_result.stats.r2 > 0.80:
         assessments['r2'] = " Fair fit (R² > 0.80)"
     else:
-        assessments['r2'] = "❌ Poor fit (R² < 0.80)"
+        assessments['r2'] = " Poor fit (R² < 0.80)"
     
     # Chi-squared assessment
     if fit_result.stats.redchi < 2.0:
@@ -328,19 +328,21 @@ def save_all_wells_results(all_results: List[Dict[str, object]], filename: str =
         metrics['RMSE'] = fit_result.stats.rmse
         
         # Add additional metrics that pick_good_peaks expects
+        total_area = sum(peak.height * peak.fwhm * np.sqrt(2 * np.pi) / 2.354820045 for peak in fit_result.peaks if peak.fwhm)
         for i, peak in enumerate(fit_result.peaks):
-            prefix = f"p{i}_"
+            prefix = f"p{i+1}"  # Use p1, p2, p3 format
             metrics[f'{prefix}_center'] = peak.center
             metrics[f'{prefix}_FWHM_est'] = peak.fwhm if peak.fwhm else np.nan
             metrics[f'{prefix}_height'] = peak.height
-            metrics[f'{prefix}_amplitude'] = peak.height * peak.fwhm * np.sqrt(2 * np.pi) / 2.354820045 if peak.fwhm else np.nan
-            metrics[f'{prefix}_area'] = peak.height * peak.fwhm * np.sqrt(2 * np.pi) / 2.354820045 if peak.fwhm else np.nan
-            metrics[f'{prefix}_frac'] = 0.1  # Default fraction, should be calculated properly
+            peak_area = peak.height * peak.fwhm * np.sqrt(2 * np.pi) / 2.354820045 if peak.fwhm else 0
+            metrics[f'{prefix}_amplitude'] = peak_area
+            metrics[f'{prefix}_area'] = peak_area
+            metrics[f'{prefix}_frac'] = peak_area / total_area if total_area > 0 else 0
         
         # Use pick_good_peaks to filter quality peaks
         good_peaks = pick_good_peaks(
             fit_result, metrics, result['data']['x'], result['data']['y'],
-            window=(500, 850), min_height_snr=5.0, min_area_frac=0.03
+            window=(500, 850), min_height_snr=3.0, min_area_frac=0.02  # More lenient thresholds
         )
         
         consolidated_data["wells"][well_name] = {
@@ -383,6 +385,36 @@ def save_all_wells_results(all_results: List[Dict[str, object]], filename: str =
         json.dump(consolidated_data, f, indent=2)
     
     return filename
+
+
+def assess_fit_quality_with_llm(llm: LLMClient, fit_image_path: str, r2_value: float, well_name: str) -> bool:
+    """Let LLM assess fit quality from the fitting plot image."""
+    fit_assessment_prompt = f"""
+    Analyze this peak fitting plot for well {well_name}. The plot shows:
+    - Blue line: Original spectrum data
+    - Red dashed line: Total fit
+    - Colored dashed lines: Individual peak components
+    - Bottom panel: Residuals (difference between data and fit)
+    
+    Current R² = {r2_value:.4f}
+    
+    Assess the fitting quality by examining:
+    1. How well the red fit line matches the blue data
+    2. Whether individual peaks capture the actual peak shapes
+    3. If residuals are randomly distributed around zero
+    4. Any systematic deviations or poor peak fits
+    
+    Return ONLY "good" if the fit is acceptable, or "poor" if it needs improvement.
+    Focus on visual fit quality, not just the R² value.
+    """
+    
+    try:
+        response = llm.generate_multimodal(fit_assessment_prompt, fit_image_path, max_tokens=50)
+        assessment = response.strip().lower()
+        return "good" in assessment
+    except Exception as e:
+        print(f"  Error in LLM fit assessment: {e}, using R² threshold")
+        return r2_value > 0.90  # Fallback to R² threshold
 
 
 def select_model_for_spectrum(llm: LLMClient, x: np.ndarray, y: np.ndarray, well_name: str) -> str:
@@ -466,35 +498,69 @@ def run_complete_analysis(
     fit_result = fit_peaks_lmfit_with_retry(
         x, y, llm_result, 
         model_kind=model_kind,
-        r2_target=r2_target,
+        r2_target=0.92,  # Higher target
         max_attempts=max_attempts
     )
     
-    # If fit is poor, try alternative models
-    if fit_result and fit_result.stats.r2 < 0.85:  # Poor fit threshold
-        print(f"  Poor fit (R²={fit_result.stats.r2:.3f}), trying alternative models...")
-        alternative_models = ['gaussian', 'voigt', 'lorentzian', 'pseudovoigt']
-        if model_kind in alternative_models:
-            alternative_models.remove(model_kind)  # Don't retry the same model
+    # Save initial fitting plot for LLM assessment
+    temp_plot_path = f'analysis_output/temp_fit_{well_name}.png'
+    save_fitting_plot_png(x, y, fit_result, temp_plot_path, 
+                          title=f'Initial Fit - Well {well_name}')
+    
+    # LLM visual assessment of fit quality
+    llm_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, fit_result.stats.r2, well_name)
+    
+    # Retry logic: continue until R² > 0.9 AND LLM says it's good
+    retry_count = 0
+    max_retries = 8  # Increased retry attempts
+    alternative_models = ['gaussian', 'voigt', 'lorentzian', 'pseudovoigt', 'skewed_gaussian']
+    if model_kind in alternative_models:
+        alternative_models.remove(model_kind)  # Don't retry the same model first
+    
+    best_fit = fit_result
+    
+    while (fit_result.stats.r2 < 0.90 or not llm_assessment) and retry_count < max_retries:
+        retry_count += 1
+        print(f"  Attempt {retry_count}: R²={fit_result.stats.r2:.3f}, LLM assessment={'good' if llm_assessment else 'poor'}")
         
-        best_fit = fit_result
-        for alt_model in alternative_models[:2]:  # Try up to 2 alternatives
-            try:
-                alt_result = fit_peaks_lmfit_with_retry(
-                    x, y, llm_result, 
-                    model_kind=alt_model,
-                    r2_target=r2_target,
-                    max_attempts=2  # Fewer attempts for alternatives
-                )
-                if alt_result and alt_result.stats.r2 > best_fit.stats.r2:
-                    print(f"  Better fit with {alt_model}: R²={alt_result.stats.r2:.3f}")
+        # Try alternative models
+        alt_model = alternative_models[retry_count % len(alternative_models)]
+        try:
+            alt_result = fit_peaks_lmfit_with_retry(
+                x, y, llm_result, 
+                model_kind=alt_model,
+                r2_target=0.92,
+                max_attempts=3
+            )
+            
+            if alt_result and alt_result.stats.r2 > best_fit.stats.r2:
+                # Test this alternative with LLM
+                save_fitting_plot_png(x, y, alt_result, temp_plot_path, 
+                                     title=f'Alternative Fit ({alt_model}) - Well {well_name}')
+                alt_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, alt_result.stats.r2, well_name)
+                
+                if alt_result.stats.r2 > 0.90 and alt_assessment:
+                    print(f"  Success with {alt_model}: R²={alt_result.stats.r2:.3f}, LLM=good")
                     best_fit = alt_result
                     break
-            except Exception as e:
-                print(f"  Alternative model {alt_model} failed: {e}")
-                continue
+                elif alt_result.stats.r2 > best_fit.stats.r2:
+                    print(f"  Improved with {alt_model}: R²={alt_result.stats.r2:.3f}")
+                    best_fit = alt_result
+                    
+        except Exception as e:
+            print(f"  Alternative model {alt_model} failed: {e}")
+            continue
         
         fit_result = best_fit
+        llm_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, fit_result.stats.r2, well_name)
+    
+    # Clean up temp file
+    try:
+        os.remove(temp_plot_path)
+    except:
+        pass
+    
+    fit_result = best_fit
     
     # Save fitting plot in output folder
     fitting_plot_file = save_fitting_plot_png(x, y, fit_result, f'analysis_output/fit_results_{well_name}.png', 
@@ -787,17 +853,46 @@ def _result_to_peaks(result: lmfit.model.ModelResult, model_kind: str) -> Tuple[
     out: List[PeakGuess] = []
     i = 0
     while True:
-        amp_key = f"p{i}_amplitude"
-        center_key = f"p{i}_center"
-        sigma_key = f"p{i}_sigma"
-        if amp_key not in params:
+        # Try different prefix patterns used by lmfit
+        prefixes_to_try = [f"p{i}_", f"g{i}_", f"v{i}_", f"l{i}_"]
+        found_peak = False
+        
+        for prefix in prefixes_to_try:
+            amp_key = f"{prefix}amplitude"
+            center_key = f"{prefix}center"
+            sigma_key = f"{prefix}sigma"
+            
+            if amp_key in params and center_key in params and sigma_key in params:
+                amp = float(params[amp_key])
+                cen = float(params[center_key])
+                sig = float(params[sigma_key])
+                
+                # Calculate height and FWHM based on model type
+                if model_kind in ['gaussian', 'skewed_gaussian']:
+                    height = _gaussian_height_from_amp(amp, sig)
+                    fwhm = 2.354820045 * sig
+                elif model_kind in ['lorentzian', 'split_lorentzian']:
+                    height = amp / (sig * np.pi)  # Lorentzian height from amplitude
+                    fwhm = 2.0 * sig
+                elif model_kind in ['voigt', 'pseudovoigt', 'skewed_voigt']:
+                    # For Voigt, use gamma parameter if available
+                    gamma_key = f"{prefix}gamma"
+                    if gamma_key in params:
+                        gamma = float(params[gamma_key])
+                        fwhm = 3.6013 * gamma  # Approximation for Voigt FWHM
+                    else:
+                        fwhm = 2.354820045 * sig  # Fallback to Gaussian
+                    height = _gaussian_height_from_amp(amp, sig)  # Approximation
+                else:
+                    height = _gaussian_height_from_amp(amp, sig)
+                    fwhm = 2.354820045 * sig
+                
+                out.append(PeakGuess(center=cen, height=height, fwhm=fwhm, prominence=None))
+                found_peak = True
+                break
+        
+        if not found_peak:
             break
-        amp = float(params[amp_key])
-        cen = float(params[center_key])
-        sig = float(params[sigma_key])
-        height = _gaussian_height_from_amp(amp, sig)
-        fwhm = 2.354820045 * sig  # for Voigt this is a simple proxy
-        out.append(PeakGuess(center=cen, height=height, fwhm=fwhm, prominence=None))
         i += 1
 
     return out, (float(baseline) if baseline is not None else None), {k: float(v) for k, v in params.items()}
@@ -1287,17 +1382,46 @@ def _result_to_peaks(result: lmfit.model.ModelResult, model_kind: str) -> Tuple[
     out: List[PeakGuess] = []
     i = 0
     while True:
-        amp_key = f"p{i}_amplitude"
-        center_key = f"p{i}_center"
-        sigma_key = f"p{i}_sigma"
-        if amp_key not in params:
+        # Try different prefix patterns used by lmfit
+        prefixes_to_try = [f"p{i}_", f"g{i}_", f"v{i}_", f"l{i}_"]
+        found_peak = False
+        
+        for prefix in prefixes_to_try:
+            amp_key = f"{prefix}amplitude"
+            center_key = f"{prefix}center"
+            sigma_key = f"{prefix}sigma"
+            
+            if amp_key in params and center_key in params and sigma_key in params:
+                amp = float(params[amp_key])
+                cen = float(params[center_key])
+                sig = float(params[sigma_key])
+                
+                # Calculate height and FWHM based on model type
+                if model_kind in ['gaussian', 'skewed_gaussian']:
+                    height = _gaussian_height_from_amp(amp, sig)
+                    fwhm = 2.354820045 * sig
+                elif model_kind in ['lorentzian', 'split_lorentzian']:
+                    height = amp / (sig * np.pi)  # Lorentzian height from amplitude
+                    fwhm = 2.0 * sig
+                elif model_kind in ['voigt', 'pseudovoigt', 'skewed_voigt']:
+                    # For Voigt, use gamma parameter if available
+                    gamma_key = f"{prefix}gamma"
+                    if gamma_key in params:
+                        gamma = float(params[gamma_key])
+                        fwhm = 3.6013 * gamma  # Approximation for Voigt FWHM
+                    else:
+                        fwhm = 2.354820045 * sig  # Fallback to Gaussian
+                    height = _gaussian_height_from_amp(amp, sig)  # Approximation
+                else:
+                    height = _gaussian_height_from_amp(amp, sig)
+                    fwhm = 2.354820045 * sig
+                
+                out.append(PeakGuess(center=cen, height=height, fwhm=fwhm, prominence=None))
+                found_peak = True
+                break
+        
+        if not found_peak:
             break
-        amp = float(params[amp_key])
-        cen = float(params[center_key])
-        sig = float(params[sigma_key])
-        height = _gaussian_height_from_amp(amp, sig)
-        fwhm = 2.354820045 * sig  # for Voigt this is a simple proxy
-        out.append(PeakGuess(center=cen, height=height, fwhm=fwhm, prominence=None))
         i += 1
 
     return out, (float(baseline) if baseline is not None else None), {k: float(v) for k, v in params.items()}
