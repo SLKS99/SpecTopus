@@ -391,13 +391,19 @@ def run_complete_analysis(
     llm: LLMClient,
     read: int = 1,
     max_peaks: int = 3,
-    model_kind: str = "gaussian",
+    model_kind: Optional[str] = None,
     r2_target: float = 0.90,
     max_attempts: int = 3
 ) -> Dict[str, object]:
     """Run complete analysis workflow for a single well."""
     # Get data
     x, y = get_xy_for_well(config, well_name, read=read)
+    
+    # Let LLM select model type if not specified
+    if model_kind is None:
+        print(f"  Selecting model type for {well_name}...")
+        model_kind = select_model_for_spectrum(llm, x, y, well_name)
+        print(f"  LLM selected model: {model_kind}")
     
     # LLM numeric analysis
     sys_prompt_numeric = get_prompt("numeric")

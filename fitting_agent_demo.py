@@ -26,7 +26,7 @@ def main():
     # Configure data processing
     print("Setting up data configuration...")
     config = build_agent_config(
-        data_csv="PEASnPbI4-Toluene.csv",           # Your PL data file
+        data_csv="PEASnPbI4 with chloroform robot (5).csv",           # Your PL data file
         composition_csv="2D-3D (1).csv",            # Your composition file
         read_selection="1",                         # Use read 1
         wells_to_ignore=None,                       # Don't ignore any wells
@@ -61,7 +61,7 @@ def main():
                     llm=llm,
                     read=1,
                     max_peaks=3,
-                    model_kind="gaussian",
+                    model_kind=None,  # Let LLM choose the model
                     r2_target=0.90,
                     max_attempts=3
                 )
@@ -69,7 +69,7 @@ def main():
                 
                 # Quick summary for each well
                 fit_result = results['fit_result']
-                print(f"✅{well_name}: {len(results['llm_numeric_result'].peaks)} peaks, R²={fit_result.stats.r2:.3f}")
+                print(f"{well_name}: {len(results['llm_numeric_result'].peaks)} peaks, R²={fit_result.stats.r2:.3f}, model={fit_result.model_kind}")
                 
             except Exception as e:
                 print(f"❌{well_name}: Error - {e}")
