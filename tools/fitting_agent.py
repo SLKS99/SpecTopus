@@ -412,7 +412,7 @@ def select_model_for_spectrum(llm: LLMClient, x: np.ndarray, y: np.ndarray, well
     """
     
     try:
-        response = llm.generate_text(model_prompt, max_tokens=50)
+        response = llm.generate(model_prompt, max_tokens=50)
         # Extract model name from response
         model_name = response.strip().lower()
         
