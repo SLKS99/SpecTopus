@@ -385,6 +385,49 @@ def save_all_wells_results(all_results: List[Dict[str, object]], filename: str =
     return filename
 
 
+def select_model_for_spectrum(llm: LLMClient, x: np.ndarray, y: np.ndarray, well_name: str) -> str:
+    """Let LLM select the appropriate model type for the spectrum."""
+    # Create a simple spectrum summary for LLM
+    spectrum_summary = f"""
+    Spectrum for Well {well_name}:
+    - Wavelength range: {x.min():.1f} - {x.max():.1f} nm
+    - Intensity range: {y.min():.1f} - {y.max():.1f}
+    - Number of peaks visible: {len(np.where(y > y.max()*0.3)[0])}
+    - Peak shape: {"Sharp" if np.std(y) > y.mean() else "Broad"}
+    """
+    
+    model_prompt = f"""
+    Based on this spectrum data, select the most appropriate lmfit model type:
+    {spectrum_summary}
+    
+    Available models:
+    - gaussian: For symmetric, bell-shaped peaks
+    - lorentzian: For broader, more rounded peaks  
+    - voigt: For peaks with both Gaussian and Lorentzian character
+    - pseudovoigt: Similar to Voigt but computationally faster
+    - skewed_gaussian: For asymmetric peaks
+    - skewed_voigt: For asymmetric peaks with mixed character
+    
+    Return ONLY the model name (e.g., "gaussian" or "voigt").
+    """
+    
+    try:
+        response = llm.generate_text(model_prompt, max_tokens=50)
+        # Extract model name from response
+        model_name = response.strip().lower()
+        
+        # Validate model name
+        valid_models = ['gaussian', 'lorentzian', 'voigt', 'pseudovoigt', 'skewed_gaussian', 'skewed_voigt']
+        if model_name in valid_models:
+            return model_name
+        else:
+            print(f"LLM returned invalid model '{model_name}', defaulting to gaussian")
+            return "gaussian"
+    except Exception as e:
+        print(f"Error in model selection: {e}, defaulting to gaussian")
+        return "gaussian"
+
+
 def run_complete_analysis(
     config: CurveFittingConfig,
     well_name: str,
@@ -419,13 +462,39 @@ def run_complete_analysis(
     sys_prompt_image = get_prompt("image")
     llm_image_result = llm_guess_peaks_from_image(llm, spectrum_image_path, system_prompt=sys_prompt_image, max_peaks=max_peaks)
     
-    # lmfit fitting
+    # lmfit fitting with automatic model retry for poor fits
     fit_result = fit_peaks_lmfit_with_retry(
         x, y, llm_result, 
         model_kind=model_kind,
         r2_target=r2_target,
         max_attempts=max_attempts
     )
+    
+    # If fit is poor, try alternative models
+    if fit_result and fit_result.stats.r2 < 0.85:  # Poor fit threshold
+        print(f"  Poor fit (R²={fit_result.stats.r2:.3f}), trying alternative models...")
+        alternative_models = ['gaussian', 'voigt', 'lorentzian', 'pseudovoigt']
+        if model_kind in alternative_models:
+            alternative_models.remove(model_kind)  # Don't retry the same model
+        
+        best_fit = fit_result
+        for alt_model in alternative_models[:2]:  # Try up to 2 alternatives
+            try:
+                alt_result = fit_peaks_lmfit_with_retry(
+                    x, y, llm_result, 
+                    model_kind=alt_model,
+                    r2_target=r2_target,
+                    max_attempts=2  # Fewer attempts for alternatives
+                )
+                if alt_result and alt_result.stats.r2 > best_fit.stats.r2:
+                    print(f"  Better fit with {alt_model}: R²={alt_result.stats.r2:.3f}")
+                    best_fit = alt_result
+                    break
+            except Exception as e:
+                print(f"  Alternative model {alt_model} failed: {e}")
+                continue
+        
+        fit_result = best_fit
     
     # Save fitting plot in output folder
     fitting_plot_file = save_fitting_plot_png(x, y, fit_result, f'analysis_output/fit_results_{well_name}.png', 
