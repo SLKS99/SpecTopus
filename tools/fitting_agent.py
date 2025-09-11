@@ -409,7 +409,13 @@ def assess_fit_quality_with_llm(llm: LLMClient, fit_image_path: str, r2_value: f
     """
     
     try:
-        response = llm.generate_multimodal(fit_assessment_prompt, fit_image_path, max_tokens=50)
+        # Load image for multimodal analysis
+        from PIL import Image
+        image = Image.open(fit_image_path)
+        
+        # Create multimodal parts list
+        parts = [fit_assessment_prompt, image]
+        response = llm.generate_multimodal(parts, max_tokens=50)
         assessment = response.strip().lower()
         return "good" in assessment
     except Exception as e:
