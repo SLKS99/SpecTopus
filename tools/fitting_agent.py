@@ -274,6 +274,20 @@ def pick_good_peaks(
     return accepted
 
 
+# ---------- lmfit multi-peak fitting with retry ----------
+
+try:
+    import lmfit
+    from lmfit.models import (
+        ConstantModel, GaussianModel, VoigtModel, LorentzianModel, 
+        PseudoVoigtModel, SkewedGaussianModel, SkewedVoigtModel,
+        ExponentialGaussianModel, SplitLorentzianModel
+    )  # type: ignore
+    _HAS_LMFIT = True
+except Exception:
+    _HAS_LMFIT = False
+
+
 def select_peak_model(model_kind: str):
     """Select appropriate lmfit model based on model_kind string."""
     if not _HAS_LMFIT:
@@ -296,6 +310,28 @@ def select_peak_model(model_kind: str):
     return model_map[model_kind]
 
 
+@dataclass
+class PeakFitStats:
+    r2: float
+    rmse: float
+    aic: float
+    bic: float
+    redchi: float
+    nfev: int
+
+
+@dataclass
+class PeakFitResult:
+    success: bool
+    stats: PeakFitStats
+    best_params: Dict[str, float]
+    peaks: List[PeakGuess]          # updated centers/heights/FWHM after fit
+    baseline: Optional[float]
+    report: str
+    model_kind: str                 # 'gaussian' or 'voigt'
+    lmfit_result: Optional[Any] = None  # Store the actual lmfit result for accurate plotting
+
+
 def save_fitting_plot_png(x: np.ndarray, y: np.ndarray, fit_result: PeakFitResult, outfile: str, *, title: Optional[str] = None) -> str:
     """Save a comprehensive fitting plot showing original data, fit, individual peaks, and residuals."""
     if not _HAS_MPL:
@@ -307,19 +343,39 @@ def save_fitting_plot_png(x: np.ndarray, y: np.ndarray, fit_result: PeakFitResul
     # Top plot: Original data and fit
     ax1.plot(x, y, 'b-', linewidth=2, label='Original data', alpha=0.8)
     
-    # Generate fit curve from peak parameters
-    fit_y = np.full_like(y, fit_result.baseline or 0.0)
-    colors = ['green', 'orange', 'purple', 'brown', 'pink', 'gray']
-    
-    for i, peak in enumerate(fit_result.peaks):
-        if peak.fwhm:
-            # Convert FWHM to sigma
-            sigma = peak.fwhm / 2.354820045
-            # Generate individual peak curve
-            peak_y = peak.height * np.exp(-((x - peak.center) / sigma) ** 2 / 2)
-            fit_y += peak_y
-            ax1.plot(x, peak_y, '--', color=colors[i % len(colors)], 
-                    alpha=0.6, linewidth=1, label=f'Peak {i+1}')
+    # CRITICAL FIX: Use the actual lmfit result instead of manual reconstruction
+    if hasattr(fit_result, 'lmfit_result') and fit_result.lmfit_result is not None:
+        # Use the actual lmfit best_fit
+        fit_y = fit_result.lmfit_result.best_fit
+        
+        # Plot individual peak components from lmfit
+        colors = ['green', 'orange', 'purple', 'brown', 'pink', 'gray']
+        try:
+            # Get individual components from lmfit result
+            components = fit_result.lmfit_result.eval_components(x=x)
+            for i, (comp_name, comp_y) in enumerate(components.items()):
+                if comp_name != 'c_':  # Skip baseline component
+                    ax1.plot(x, comp_y, '--', color=colors[i % len(colors)], 
+                            alpha=0.6, linewidth=1, label=f'Peak {comp_name}')
+        except:
+            # Fallback: show peaks as vertical lines at centers
+            for i, peak in enumerate(fit_result.peaks):
+                ax1.axvline(peak.center, color=colors[i % len(colors)], 
+                           linestyle='--', alpha=0.6, label=f'Peak {i+1} center')
+    else:
+        # Fallback to manual reconstruction (old method)
+        fit_y = np.full_like(y, fit_result.baseline or 0.0)
+        colors = ['green', 'orange', 'purple', 'brown', 'pink', 'gray']
+        
+        for i, peak in enumerate(fit_result.peaks):
+            if peak.fwhm:
+                # Convert FWHM to sigma
+                sigma = peak.fwhm / 2.354820045
+                # Generate individual peak curve (Gaussian approximation)
+                peak_y = peak.height * np.exp(-((x - peak.center) / sigma) ** 2 / 2)
+                fit_y += peak_y
+                ax1.plot(x, peak_y, '--', color=colors[i % len(colors)], 
+                        alpha=0.6, linewidth=1, label=f'Peak {i+1}')
     
     ax1.plot(x, fit_y, 'r--', linewidth=2, label='Total Fit', alpha=0.9)
     
@@ -330,7 +386,7 @@ def save_fitting_plot_png(x: np.ndarray, y: np.ndarray, fit_result: PeakFitResul
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # Bottom plot: Residuals
+    # Bottom plot: Residuals - USE CORRECT FIT DATA
     residuals = y - fit_y
     ax2.plot(x, residuals, 'g-', linewidth=1, label='Residuals')
     ax2.axhline(y=0, color='black', linestyle='--', alpha=0.5)
@@ -841,41 +897,6 @@ def llm_guess_peaks(
     )
 
 
-# ---------- lmfit multi-peak fitting with retry ----------
-
-try:
-    import lmfit
-    from lmfit.models import (
-        ConstantModel, GaussianModel, VoigtModel, LorentzianModel, 
-        PseudoVoigtModel, SkewedGaussianModel, SkewedVoigtModel,
-        ExponentialGaussianModel, SplitLorentzianModel
-    )  # type: ignore
-    _HAS_LMFIT = True
-except Exception:
-    _HAS_LMFIT = False
-
-
-@dataclass
-class PeakFitStats:
-    r2: float
-    rmse: float
-    aic: float
-    bic: float
-    redchi: float
-    nfev: int
-
-
-@dataclass
-class PeakFitResult:
-    success: bool
-    stats: PeakFitStats
-    best_params: Dict[str, float]
-    peaks: List[PeakGuess]          # updated centers/heights/FWHM after fit
-    baseline: Optional[float]
-    report: str
-    model_kind: str                 # 'gaussian' or 'voigt'
-
-
 def _estimate_sigma_from_fwhm(fwhm: float) -> float:
     return float(fwhm) / 2.354820045  # FWHM = 2*sqrt(2*ln2)*sigma
 
@@ -1113,6 +1134,7 @@ def fit_peaks_lmfit_with_retry(
         baseline=best_params.get("c_c", None),
         report=best_report,
         model_kind=model_kind,
+        lmfit_result=best_result,  # Store the actual lmfit result
     )
 
 
@@ -1368,278 +1390,3 @@ def get_xy_for_well(config: CurveFittingConfig, well: str, read: Optional[int] =
     agent = CurveFitting(config)
     curated = agent.curate_dataset()
     return agent.get_xy(curated, well=well, read=read)
-
-
-# ---------- lmfit multi-peak fitting with retry ----------
-
-try:
-    import lmfit
-    from lmfit.models import (
-        ConstantModel, GaussianModel, VoigtModel, LorentzianModel, 
-        PseudoVoigtModel, SkewedGaussianModel, SkewedVoigtModel,
-        ExponentialGaussianModel, SplitLorentzianModel
-    )  # type: ignore
-    _HAS_LMFIT = True
-except Exception:
-    _HAS_LMFIT = False
-
-
-@dataclass
-class PeakFitStats:
-    r2: float
-    rmse: float
-    aic: float
-    bic: float
-    redchi: float
-    nfev: int
-
-
-@dataclass
-class PeakFitResult:
-    success: bool
-    stats: PeakFitStats
-    best_params: Dict[str, float]
-    peaks: List[PeakGuess]          # updated centers/heights/FWHM after fit
-    baseline: Optional[float]
-    report: str
-    model_kind: str                 # 'gaussian' or 'voigt'
-
-
-def _estimate_sigma_from_fwhm(fwhm: float) -> float:
-    return float(fwhm) / 2.354820045  # FWHM = 2*sqrt(2*ln2)*sigma
-
-
-def _guess_sigma_from_span(x: np.ndarray, frac: float = 0.02) -> float:
-    span = float(np.max(x) - np.min(x))
-    return max(1e-6, frac * span)
-
-
-def _height_to_gaussian_amplitude(height: float, sigma: float) -> float:
-    # For GaussianModel, amplitude is area = height * sigma * sqrt(2*pi)
-    return float(height) * float(sigma) * np.sqrt(2.0 * np.pi)
-
-
-def _gaussian_height_from_amp(amplitude: float, sigma: float) -> float:
-    return float(amplitude) / (float(sigma) * np.sqrt(2.0 * np.pi))
-
-
-def _build_composite_model(
-    x: np.ndarray,
-    y: np.ndarray,
-    peaks: List[PeakGuess],
-    baseline: Optional[float],
-    *,
-    model_kind: str = "gaussian",       # 'gaussian' or 'voigt'
-    center_window: Optional[float] = None,   # absolute window around initial center
-    sigma_bounds: Optional[Tuple[float, float]] = None,
-) -> Tuple[lmfit.Model, lmfit.Parameters]:
-    if not _HAS_LMFIT:
-        raise RuntimeError("lmfit is required. pip install lmfit")
-
-    xmin, xmax = float(np.min(x)), float(np.max(x))
-    span = xmax - xmin
-    if center_window is None:
-        center_window = 0.10 * span
-    if sigma_bounds is None:
-        sigma_bounds = (max(1e-6, 0.002 * span), max(1e-6, 0.20 * span))
-
-    model = ConstantModel(prefix="c_")
-    params = model.make_params()
-    base_val = float(baseline) if baseline is not None else float(np.nanmin(y))
-    params["c_c"].set(value=base_val, min=-np.inf, max=np.inf)
-
-    for i, pk in enumerate(peaks):
-        prefix = f"p{i}_"
-        comp = select_peak_model(model_kind)(prefix=prefix)
-        model = model + comp
-
-        if pk.fwhm and pk.fwhm > 0:
-            sigma0 = _estimate_sigma_from_fwhm(pk.fwhm)
-        else:
-            sigma0 = _guess_sigma_from_span(x)
-
-        amp0 = _height_to_gaussian_amplitude(pk.height, sigma0) if pk.height is not None else \
-            float(np.trapz(y, x) / max(1, len(peaks)))
-
-        p = comp.make_params()
-        p[f"{prefix}amplitude"].set(value=float(amp0), min=0.0, max=np.inf)
-        c0 = float(pk.center)
-        p[f"{prefix}center"].set(value=c0, min=c0 - center_window, max=c0 + center_window)
-        p[f"{prefix}sigma"].set(value=float(sigma0), min=sigma_bounds[0], max=sigma_bounds[1])
-
-        if model_kind == "voigt" and f"{prefix}gamma" in p:
-            p[f"{prefix}gamma"].set(value=float(sigma0), min=sigma_bounds[0], max=sigma_bounds[1])
-
-        params.update(p)
-
-    return model, params
-
-
-def _fit_once(
-    x: np.ndarray,
-    y: np.ndarray,
-    peaks: List[PeakGuess],
-    baseline: Optional[float],
-    *,
-    model_kind: str = "gaussian",
-) -> lmfit.model.ModelResult:
-    model, params = _build_composite_model(x, y, peaks, baseline, model_kind=model_kind)
-    return model.fit(y, params, x=x, nan_policy="omit", max_nfev=10000)
-
-
-def _score_fit(y: np.ndarray, yhat: np.ndarray) -> Tuple[float, float]:
-    resid = y - yhat
-    ss_res = float(np.sum(resid**2))
-    ss_tot = float(np.sum((y - np.mean(y))**2)) + 1e-16
-    r2 = 1.0 - ss_res / ss_tot
-    rmse = float(np.sqrt(ss_res / max(1, len(y))))
-    return r2, rmse
-
-
-def _result_to_peaks(result: lmfit.model.ModelResult, model_kind: str) -> Tuple[List[PeakGuess], Optional[float], Dict[str, float]]:
-    params = result.best_values
-    baseline = params.get("c_c", None)
-
-    out: List[PeakGuess] = []
-    i = 0
-    while True:
-        # Try different prefix patterns used by lmfit
-        prefixes_to_try = [f"p{i}_", f"g{i}_", f"v{i}_", f"l{i}_"]
-        found_peak = False
-        
-        for prefix in prefixes_to_try:
-            amp_key = f"{prefix}amplitude"
-            center_key = f"{prefix}center"
-            sigma_key = f"{prefix}sigma"
-            
-            if amp_key in params and center_key in params and sigma_key in params:
-                amp = float(params[amp_key])
-                cen = float(params[center_key])
-                sig = float(params[sigma_key])
-                
-                # Calculate height and FWHM based on model type
-                if model_kind in ['gaussian', 'skewed_gaussian']:
-                    height = _gaussian_height_from_amp(amp, sig)
-                    fwhm = 2.354820045 * sig
-                elif model_kind in ['lorentzian', 'split_lorentzian']:
-                    height = amp / (sig * np.pi)  # Lorentzian height from amplitude
-                    fwhm = 2.0 * sig
-                elif model_kind in ['voigt', 'pseudovoigt', 'skewed_voigt']:
-                    # For Voigt, use gamma parameter if available
-                    gamma_key = f"{prefix}gamma"
-                    if gamma_key in params:
-                        gamma = float(params[gamma_key])
-                        fwhm = 3.6013 * gamma  # Approximation for Voigt FWHM
-                    else:
-                        fwhm = 2.354820045 * sig  # Fallback to Gaussian
-                    height = _gaussian_height_from_amp(amp, sig)  # Approximation
-                else:
-                    height = _gaussian_height_from_amp(amp, sig)
-                    fwhm = 2.354820045 * sig
-                
-                out.append(PeakGuess(center=cen, height=height, fwhm=fwhm, prominence=None))
-                found_peak = True
-                break
-        
-        if not found_peak:
-            break
-        i += 1
-
-    return out, (float(baseline) if baseline is not None else None), {k: float(v) for k, v in params.items()}
-
-
-def fit_peaks_lmfit_with_retry(
-    x: np.ndarray,
-    y: np.ndarray,
-    seed: PeakResult,
-    *,
-    model_kind: str = "gaussian",    # 'gaussian' or 'voigt'
-    r2_target: float = 0.90,
-    max_attempts: int = 5,
-    jitter_frac_center: float = 0.01,
-    jitter_frac_sigma: float = 0.25,
-    allow_baseline_refit: bool = True,
-) -> PeakFitResult:
-    """
-    Fit multi-peak PL curves with lmfit. Retries with randomized restarts
-    until R² >= r2_target or attempts are exhausted.
-    """
-    if not _HAS_LMFIT:
-        raise RuntimeError("lmfit is required. pip install lmfit")
-
-    rng = np.random.default_rng()
-    xmin, xmax = float(np.min(x)), float(np.max(x))
-    span = xmax - xmin
-
-    def _jitter(pr: PeakResult) -> PeakResult:
-        new_peaks: List[PeakGuess] = []
-        for pk in pr.peaks:
-            c = pk.center + rng.uniform(-jitter_frac_center, jitter_frac_center) * span
-            if pk.fwhm and pk.fwhm > 0:
-                sig = _estimate_sigma_from_fwhm(pk.fwhm)
-                sig *= (1.0 + rng.uniform(-jitter_frac_sigma, jitter_frac_sigma))
-                fwhm = 2.354820045 * max(sig, 1e-6)
-            else:
-                fwhm = None
-            h = max(1e-12, pk.height * (1.0 + rng.uniform(-0.15, 0.15)))
-            new_peaks.append(PeakGuess(center=float(c), height=float(h), fwhm=(float(fwhm) if fwhm else None)))
-        base = pr.baseline
-        if allow_baseline_refit and base is not None:
-            base = base * (1.0 + rng.uniform(-0.10, 0.10))
-        return PeakResult(peaks=new_peaks, baseline=(float(base) if base is not None else None))
-
-    best_result = None
-    best_stats = None
-    best_report = ""
-    best_params: Dict[str, float] = {}
-    best_peaks: List[PeakGuess] = []
-    success = False
-
-    attempt = 0
-    current_seed = seed
-
-    while attempt < max_attempts:
-        attempt += 1
-        try:
-            result = _fit_once(x, y, current_seed.peaks, current_seed.baseline, model_kind=model_kind)
-        except Exception:
-            current_seed = _jitter(seed)
-            continue
-
-        yhat = result.best_fit
-        r2, rmse = _score_fit(y, yhat)
-        stats = PeakFitStats(
-            r2=r2,
-            rmse=rmse,
-            aic=float(result.aic),
-            bic=float(result.bic),
-            redchi=float(result.redchi),
-            nfev=int(result.nfev),
-        )
-        peaks_out, base_out, params_out = _result_to_peaks(result, model_kind)
-
-        if (best_result is None) or (stats.r2 > best_stats.r2):  # type: ignore
-            best_result = result
-            best_stats = stats
-            best_report = result.fit_report(min_correl=0.3)
-            best_params = params_out
-            best_peaks = peaks_out
-
-        if stats.r2 >= r2_target:
-            success = True
-            break
-
-        current_seed = _jitter(seed)
-
-    if best_result is None or best_stats is None:
-        raise RuntimeError("lmfit did not produce a valid result across attempts")
-
-    return PeakFitResult(
-        success=success,
-        stats=best_stats,
-        best_params=best_params,
-        peaks=best_peaks,
-        baseline=best_params.get("c_c", None),
-        report=best_report,
-        model_kind=model_kind,
-    )
