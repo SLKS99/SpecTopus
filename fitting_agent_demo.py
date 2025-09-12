@@ -94,7 +94,7 @@ def main():
                             print(f"📂 {file_type} file moved to {dest}")
                 
             except Exception as e:
-                print(f"❌{well_name}: Error - {e}")
+                print(f"{well_name}: Error - {e}")
                 continue
         
         # Display summary results
