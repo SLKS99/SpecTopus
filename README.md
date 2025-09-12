@@ -1,6 +1,33 @@
-# SpecTopus Technical Documentation
+# SpecTopus: Automated Peak Fitting for High-Throughput Perovskite Research
 
-A Python-based system for automated analysis of photoluminescence spectra using Large Language Models (LLMs) and advanced curve fitting techniques.
+## Why SpecTopus?
+
+In the rapidly evolving field of perovskite research, self-driving laboratories are revolutionizing how we conduct experiments and analyze data. Our automated synthesis and characterization methods can produce and analyze 96 different perovskite compositions in a single run, generating photoluminescence (PL) evolution data over approximately 12 hours. This high-throughput approach results in thousands of PL spectra that need careful analysis.
+
+### The Challenge
+
+Each spectrum can contain multiple peaks, and these peaks can exhibit various changes:
+- Peak position shifts
+- Intensity variations
+- Changes in Full Width at Half Maximum (FWHM)
+- Multiple overlapping peaks
+- Time-dependent evolution
+
+Manually fitting and analyzing this volume of data would be:
+- Time-consuming
+- Error-prone
+- A bottleneck in the research pipeline
+- A waste of valuable researcher time that could be spent on experimental design and interpretation
+
+### The Solution
+
+SpecTopus is an automated peak fitting workflow that integrates seamlessly with automated synthesis and characterization methods. By leveraging an intelligent agent-based approach, it:
+
+1. Automatically analyzes PL spectra without human intervention
+2. Accurately identifies and fits multiple peaks
+3. Tracks changes in peak characteristics over time
+4. Provides real-time visualization of the fitting process
+5. Generates comprehensive analysis reports
 
 ## Features
 
@@ -10,6 +37,22 @@ A Python-based system for automated analysis of photoluminescence spectra using 
 - **Curve fitting**: Integrates with lmfit for robust peak fitting using Gaussian and Voigt models
 - **Quality metrics**: Automatic R² score tracking and fit validation
 - **Batch processing**: Handles multiple wells and reads efficiently
+- **Time Evolution Tracking**: Monitor changes in peak characteristics over time
+
+## Impact
+
+By automating the peak fitting process, SpecTopus allows researchers to:
+- Focus on experimental design and interpretation
+- Process large datasets quickly and accurately
+- Identify trends and patterns more efficiently
+- Accelerate the pace of perovskite research
+- Integrate with automated synthesis workflows
+
+This tool is an essential component in the modern self-driving laboratory, enabling truly high-throughput experimentation and analysis in perovskite research.
+
+---
+
+# Technical Documentation
 
 ## Setup
 
@@ -82,6 +125,26 @@ You can adjust various parameters in `fitting_agent_demo.py`:
 - `MAX_PEAKS`: Maximum peaks to find per spectrum
 - `R2_TARGET`: Minimum R² for good fits
 - `MAX_ATTEMPTS`: Retry attempts for poor fits
+
+### Visualization Features
+
+The demo provides multiple ways to visualize and validate results:
+
+1. **Real-time Analysis View**:
+   - Side-by-side comparison of raw and fitted data
+   - Live peak identification and fitting
+   - Quality metrics tracking
+
+2. **Interactive Dashboard**:
+   - Peak distribution analysis
+   - R² score distribution
+   - Peak characteristics visualization
+   - Model performance summary
+
+3. **Quality Assessment**:
+   - Color-coded quality indicators
+   - Progress tracking
+   - Automated validation of fits
 
 ### Output Files
 
