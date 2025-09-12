@@ -4,6 +4,8 @@ This script demonstrates the complete workflow by calling functions from fitting
 """
 
 import os
+import json
+import shutil
 from tools.fitting_agent import (
     LLMClient, 
     build_agent_config,
@@ -11,16 +13,21 @@ from tools.fitting_agent import (
     run_complete_analysis
 )
 
+# Ensure output directory exists
+OUTPUT_DIR = "output"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 
 def main():
     print("=== PL Spectrum Analysis Demo ===")
     
     # Set up the API key
-    os.environ["GOOGLE_API_KEY"] = "AIzaSyB-3zT32fNofbvF7_WbR1UfY0RCm2QglZw"
-    
+    # os.environ["GOOGLE_API_KEY"] = "AIzaSyB-3zT32fNofbvF7_WbR1UfY0RCm2QglZw"
+
     # Initialize LLM client
     print("Initializing LLM client...")
-    llm = LLMClient()
+    # llm = LLMClient()
+    llm = LLMClient(provider="openai", model_id="gpt-4o-mini")
     
     # Configure data processing
     print("Setting up data configuration...")
@@ -70,6 +77,21 @@ def main():
                 fit_result = results['fit_result']
                 print(f"✅ {well_name}: {len(results['llm_numeric_result'].peaks)} peaks, R²={fit_result.stats.r2:.3f}")
                 
+                # Save each well's results as JSON
+                output_path = os.path.join(OUTPUT_DIR, f"{well_name}_results.json")
+                with open(output_path, "w") as f:
+                    json.dump(results, f, indent=2, default=str)
+                print(f"📁 Results saved to {output_path}")
+                
+                # Move any generated files (png, csv, etc.) into output/
+                if "files" in results:
+                    for file_type, filename in results["files"].items():
+                        if os.path.exists(filename):
+                            dest = os.path.join(OUTPUT_DIR, os.path.basename(filename))
+                            shutil.move(filename, dest)
+                            results["files"][file_type] = dest  # update path
+                            print(f"📂 {file_type} file moved to {dest}")
+                
             except Exception as e:
                 print(f"❌ {well_name}: Error - {e}")
                 continue
@@ -77,6 +99,16 @@ def main():
         # Display summary results
         print(f"\n=== Analysis Summary ===")
         print(f"Successfully analyzed {len(all_results)} out of {len(available_wells)} wells")
+        
+        # Save overall summary
+        summary_path = os.path.join(OUTPUT_DIR, "analysis_summary.txt")
+        with open(summary_path, "w") as f:
+            f.write(f"Successfully analyzed {len(all_results)} out of {len(available_wells)} wells\n")
+            for res in all_results:
+                well_name = res['well_name']
+                r2 = res['fit_result'].stats.r2 if res['fit_result'].success else "N/A"
+                f.write(f"{well_name}: R²={r2}\n")
+        print(f"📊 Summary saved to {summary_path}")
         
         # Show top performing wells
         successful_results = [r for r in all_results if r['fit_result'].success]
@@ -133,12 +165,11 @@ def main():
                 print(f"- {file_type}: {filename}")
         
         print(f"\n=== Demo completed! ===")
-        print(f"Analyzed {len(all_results)} wells. Check the generated files for detailed results.")
+        print(f"Analyzed {len(all_results)} wells. Check the generated files in '{OUTPUT_DIR}' for detailed results.")
         
     except Exception as e:
         print(f"Error processing data: {e}")
         print("Make sure your CSV files are in the correct format and accessible.")
-
 
 if __name__ == "__main__":
     main()
