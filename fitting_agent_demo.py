@@ -72,7 +72,7 @@ def main():
                 print(f"{well_name}: {len(results['llm_numeric_result'].peaks)} peaks, R²={fit_result.stats.r2:.3f}, model={fit_result.model_kind}")
                 
             except Exception as e:
-                print(f"❌{well_name}: Error - {e}")
+                print(f"{well_name}: Error - {e}")
                 continue
         
         # Display summary results
