@@ -1,45 +1,100 @@
 """
-Demo script for analyzing PL spectrum data using the fitting agent.
-This script demonstrates the complete workflow by calling functions from fitting_agent.py.
+=== PL Spectrum Analysis Demo ===
+
+This is a SIMPLE DEMO script that analyzes photoluminescence spectra.
+All the complex functions are defined in tools/fitting_agent.py and tools/instruct.py.
+This demo just configures parameters and runs the analysis.
+
+ WHAT YOU CAN CHANGE (Configuration Section Below):
+   - DATA_FILE: Your CSV data file name
+   - COMPOSITION_FILE: Your composition mapping file  
+   - READS_TO_ANALYZE: Which read(s) to analyze
+   - WAVELENGTH_RANGE: Start and end wavelengths
+   - MAX_PEAKS: Maximum peaks to find per spectrum
+   - R2_TARGET: Minimum R² for good fits (0.90 = 90%)
+   - MAX_ATTEMPTS: How many fitting attempts before giving up
+
+ WHAT YOU CANNOT CHANGE (Fixed Logic):
+   - LLM model selection (automatic based on spectrum shape)
+   - Fitting algorithms (uses lmfit library)
+   - Quality filtering (uses pick_good_peaks function)
+   - Output format (consolidated JSON + PNG plots)
+
+ HOW TO RUN:
+   1. Set GOOGLE_API_KEY environment variable (use setup_env.ps1)
+   2. Activate virtual environment: .\venv\Scripts\Activate.ps1
+   3. Run: python fitting_agent_demo.py
+
+OUTPUTS:
+   - analysis_output/: All PNG plots and images
+   - results/: Consolidated JSON with all analysis results
 """
 
 import os
-import json
-import shutil
 from tools.fitting_agent import (
     LLMClient, 
     build_agent_config,
     curate_dataset,
     run_complete_analysis,
-    save_all_wells_results
+    save_all_wells_results,
+    export_peak_data_from_json
 )
-
-# Ensure output directory exists
-OUTPUT_DIR = "output"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def main():
     print("=== PL Spectrum Analysis Demo ===")
     
-    # Set up the API key
-    # os.environ["GOOGLE_API_KEY"] = "AIzaSyB-3zT32fNofbvF7_WbR1UfY0RCm2QglZw"
+    # ========================================
+    #  CONFIGURATION SECTION (CHANGE THESE)
+    # ========================================
+    
+    # Data Files (put your files in the main directory)
+    DATA_FILE = "8-29-25 Tern FAF-PEA5-AVA 9 to 1 0.4M 0.csv"  # Your PL spectrum data
+    COMPOSITION_FILE = "2D-3D (1).csv"                          # Your composition mapping
+    
+    # Read Selection Options:
+    READS_TO_ANALYZE = 2        # Single read: 2
+    # READS_TO_ANALYZE = [1,2,3]  # Multiple reads: [1,2,3]  
+    # READS_TO_ANALYZE = "auto"   # Auto: first available
+    # READS_TO_ANALYZE = "all"    # All available reads
+    
+    # Wavelength Range (nm)
+    WAVELENGTH_START = 500      # Start wavelength
+    WAVELENGTH_END = 860        # End wavelength
+    WAVELENGTH_STEP = 2         # Step size
+    
+    # Peak Fitting Parameters
+    MAX_PEAKS = 3               # Maximum peaks to find per spectrum
+    R2_TARGET = 0.90            # Minimum R² for good fits (0.90 = 90%)
+    MAX_ATTEMPTS = 3            # Max retry attempts for poor fits
+    
+    # Output Options
+    SAVE_PNG_PLOTS = True       # Set to False to skip saving final PNG files (keeps LLM analysis)
+    EXPORT_CSV = True           # Set to True to export peak data as CSV file
+    
+    # ========================================
+    #  ANALYSIS EXECUTION (DON'T CHANGE)
+    # ========================================
+    
+    # Initialize Gemini LLM client (reads GOOGLE_API_KEY from environment)
+    print("Initializing Gemini LLM client...")
+    print(f"API key exists: {'GOOGLE_API_KEY' in os.environ}")
+    
 
-    # Initialize LLM client
-    print("Initializing LLM client...")
-    # llm = LLMClient()
-    llm = LLMClient(provider="openai", model_id="gpt-4o-mini")
+    llm = LLMClient(provider="gemini", model_id="gemini-1.5-flash")
+        
+ 
     
     # Configure data processing
     print("Setting up data configuration...")
     config = build_agent_config(
-        data_csv="PEASnPbI4 with chloroform robot (5).csv",           # Your PL data file
-        composition_csv="2D-3D (1).csv",            # Your composition file
-        read_selection="1",                         # Use read 1
-        wells_to_ignore=None,                       # Don't ignore any wells
-        start_wavelength=500,                       # Emission start 500nm
-        end_wavelength=850,                         # Emission stop 850nm
-        wavelength_step_size=1,                     # Step 1nm
+        data_csv=DATA_FILE,
+        composition_csv=COMPOSITION_FILE,
+        read_selection=str(READS_TO_ANALYZE if isinstance(READS_TO_ANALYZE, int) else READS_TO_ANALYZE[0]),
+        wells_to_ignore=None,
+        start_wavelength=WAVELENGTH_START,
+        end_wavelength=WAVELENGTH_END,
+        wavelength_step_size=WAVELENGTH_STEP,
         fill_na_value=0.0
     )
     
@@ -50,9 +105,10 @@ def main():
         print("Available wells:", curated["wells"][:10], "...")
         print("Available reads:", curated["reads"])
         
-        # Analyze all wells for read 1
+        # Analyze all wells with flexible read selection
         available_wells = curated["wells"]
         print(f"\nFound {len(available_wells)} wells to analyze")
+        print("Read options: single int (2), list ([1,2,3]), 'auto' (first available), or 'all' (all available)")
         
         # Run complete analysis for all wells
         print("\n=== Running Complete Analysis for All Wells ===")
@@ -66,32 +122,30 @@ def main():
                     config=config,
                     well_name=well_name,
                     llm=llm,
-                    read=1,
-                    max_peaks=3,
-                    model_kind=None,  # Let LLM choose the model
-                    r2_target=0.90,
-                    max_attempts=3
+                    reads=READS_TO_ANALYZE,
+                    max_peaks=MAX_PEAKS,
+                    model_kind=None,  # Let LLM choose the model automatically
+                    r2_target=R2_TARGET,
+                    max_attempts=MAX_ATTEMPTS,
+                    save_plots=SAVE_PNG_PLOTS
                 )
-                all_results.append(results)
                 
-                # Quick summary for each well
-                fit_result = results['fit_result']
-                print(f"{well_name}: {len(results['llm_numeric_result'].peaks)} peaks, R²={fit_result.stats.r2:.3f}, model={fit_result.model_kind}")
+                # Handle both single and multiple read results
+                if isinstance(results, list):
+                    # Multiple reads - add each result separately
+                    all_results.extend(results)
+                    # Summary for multiple reads
+                    for result in results:
+                        fit_result = result['fit_result']
+                        print(f"{well_name} Read {result['read']}: {len(result['llm_numeric_result'].peaks)} peaks, R²={fit_result.stats.r2:.3f}, model={fit_result.model_kind}")
+                else:
+                    # Single read - add as single result
+                    all_results.append(results)
+                    # Quick summary for single read
+                    fit_result = results['fit_result']
+                    print(f"{well_name}: {len(results['llm_numeric_result'].peaks)} peaks, R²={fit_result.stats.r2:.3f}, model={fit_result.model_kind}")
                 
-                # Save each well's results as JSON
-                output_path = os.path.join(OUTPUT_DIR, f"{well_name}_results.json")
-                with open(output_path, "w") as f:
-                    json.dump(results, f, indent=2, default=str)
-                print(f"📁 Results saved to {output_path}")
-                
-                # Move any generated files (png, csv, etc.) into output/
-                if "files" in results:
-                    for file_type, filename in results["files"].items():
-                        if os.path.exists(filename):
-                            dest = os.path.join(OUTPUT_DIR, os.path.basename(filename))
-                            shutil.move(filename, dest)
-                            results["files"][file_type] = dest  # update path
-                            print(f"📂 {file_type} file moved to {dest}")
+                # Files are automatically organized by run_complete_analysis
                 
             except Exception as e:
                 print(f"{well_name}: Error - {e}")
@@ -102,14 +156,14 @@ def main():
         print(f"Successfully analyzed {len(all_results)} out of {len(available_wells)} wells")
         
         # Save overall summary
-        summary_path = os.path.join(OUTPUT_DIR, "analysis_summary.txt")
+        summary_path = "results/analysis_summary.txt"
         with open(summary_path, "w") as f:
             f.write(f"Successfully analyzed {len(all_results)} out of {len(available_wells)} wells\n")
             for res in all_results:
                 well_name = res['well_name']
                 r2 = res['fit_result'].stats.r2 if res['fit_result'].success else "N/A"
                 f.write(f"{well_name}: R²={r2}\n")
-        print(f"📊 Summary saved to {summary_path}")
+        print(f" Summary saved to {summary_path}")
         
         # Show top performing wells
         successful_results = [r for r in all_results if r['fit_result'].success]
@@ -170,6 +224,16 @@ def main():
             print(f"\n=== Saving Consolidated Results ===")
             consolidated_file = save_all_wells_results(all_results, "results/all_wells_comprehensive_analysis.json")
             print(f"Consolidated analysis saved to: {consolidated_file}")
+            
+            # Export peak data to CSV if requested (using the clean JSON approach)
+            if EXPORT_CSV:
+                print(f"\n=== Exporting Peak Data to CSV ===")
+                csv_file = export_peak_data_from_json(
+                    consolidated_file, 
+                    "results/peak_data_export.csv",
+                    composition_csv=COMPOSITION_FILE
+                )
+                print(f"Peak data exported to: {csv_file}")
         
         print(f"\n=== Demo completed! ===")
 

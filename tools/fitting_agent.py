@@ -12,7 +12,11 @@ import numpy as np
 import pandas as pd
 
 # Import from instruct module
-from .instruct import get_prompt
+try:
+    from tools.instruct import get_prompt
+except ModuleNotFoundError:
+    # Fallback for when running from within tools directory
+    from instruct import get_prompt
 
 # ---------- LLM client (Gemini) ----------
 
@@ -558,6 +562,158 @@ def save_all_wells_results(all_results: List[Dict[str, object]], filename: str =
     return filename
 
 
+def export_peak_data_to_csv(all_results: List[Dict[str, object]], filename: str = "results/peak_data_export.csv") -> str:
+    """Export peak data from quality peaks to a structured CSV file."""
+    
+    # Prepare data for DataFrame
+    csv_data = []
+    
+    for result in all_results:
+        well_name = result['well_name']
+        read = result['read']
+        composition = well_name  # Use well name as composition
+        
+        # Get quality peaks and metrics directly from the result
+        # (These were already processed by save_all_wells_results)
+        fit_result = result['fit_result']
+        
+        # Check if this result has quality_peaks already processed
+        if 'quality_peaks' in result:
+            # Use pre-processed quality peaks
+            quality_peaks = result['quality_peaks']
+        else:
+            # Fallback: create comprehensive metrics and use pick_good_peaks
+            metrics = fit_result.best_params.copy()
+            metrics['RMSE'] = fit_result.stats.rmse
+            
+            total_area = sum(peak.height * peak.fwhm * np.sqrt(2 * np.pi) / 2.354820045 for peak in fit_result.peaks if peak.fwhm)
+            for i, peak in enumerate(fit_result.peaks):
+                prefix = f"p{i+1}"
+                metrics[f'{prefix}_center'] = peak.center
+                metrics[f'{prefix}_FWHM_est'] = peak.fwhm if peak.fwhm else np.nan
+                metrics[f'{prefix}_height'] = peak.height
+                peak_area = peak.height * peak.fwhm * np.sqrt(2 * np.pi) / 2.354820045 if peak.fwhm else 0
+                metrics[f'{prefix}_amplitude'] = peak_area
+                metrics[f'{prefix}_area'] = peak_area
+                metrics[f'{prefix}_frac'] = peak_area / total_area if total_area > 0 else 0
+            
+            # Use pick_good_peaks to filter quality peaks
+            quality_peaks = pick_good_peaks(
+                fit_result, metrics, result['data']['x'], result['data']['y'],
+                window=(500, 850), min_height_snr=3.0, min_area_frac=0.02
+            )
+        
+        # Create row data
+        row_data = {
+            'Read': read,
+            'Composition': composition,
+            'Well': well_name,
+            'R_squared': float(fit_result.stats.r2),
+            'Total_Quality_Peaks': len(quality_peaks)
+        }
+        
+        # Add peak data (up to 5 peaks)
+        for i in range(5):  # Support up to 5 peaks
+            if i < len(quality_peaks):
+                peak = quality_peaks[i]
+                row_data[f'Peak_{i+1}_Wavelength'] = peak['center_nm']
+                row_data[f'Peak_{i+1}_Intensity'] = peak['height']
+                row_data[f'Peak_{i+1}_FWHM'] = peak['FWHM_nm']
+                row_data[f'Peak_{i+1}_Area'] = peak['area']
+            else:
+                # Fill empty peaks with NaN
+                row_data[f'Peak_{i+1}_Wavelength'] = np.nan
+                row_data[f'Peak_{i+1}_Intensity'] = np.nan
+                row_data[f'Peak_{i+1}_FWHM'] = np.nan
+                row_data[f'Peak_{i+1}_Area'] = np.nan
+        
+        csv_data.append(row_data)
+    
+    # Create DataFrame
+    df = pd.DataFrame(csv_data)
+    
+    # Create results directory if it doesn't exist
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    
+    # Save to CSV
+    df.to_csv(filename, index=False)
+    
+    return filename
+
+
+def export_peak_data_from_json(json_filename: str, csv_filename: str = "results/peak_data_export.csv", 
+                              composition_csv: str = None) -> str:
+    """Export peak data directly from consolidated JSON file to CSV with composition data."""
+    
+    # Load JSON data
+    with open(json_filename, 'r') as f:
+        data = json.load(f)
+    
+    # Load composition data if provided
+    composition_data = None
+    if composition_csv and os.path.exists(composition_csv):
+        try:
+            composition_data = pd.read_csv(composition_csv, index_col=0)
+            print(f"Loaded composition data with columns: {list(composition_data.columns)}")
+        except Exception as e:
+            print(f"Warning: Could not load composition data: {e}")
+    
+    # Prepare data for DataFrame
+    csv_data = []
+    
+    for well_name, well_data in data['wells'].items():
+        read = well_data['read']
+        
+        # Get quality peaks directly from JSON
+        quality_peaks = well_data['fitting_results']['quality_peaks']
+        r_squared = well_data['fitting_results']['quality_metrics']['r_squared']
+        
+        # Create row data
+        row_data = {
+            'Read': read,
+            'Well': well_name,
+            'R_squared': float(r_squared),
+            'Total_Quality_Peaks': len(quality_peaks)
+        }
+        
+        # Add composition data if available
+        if composition_data is not None and well_name in composition_data.columns:
+            # Add each material composition as separate columns
+            for material in composition_data.index:
+                row_data[f'{material}'] = composition_data.loc[material, well_name]
+        else:
+            # Fallback: use well name as composition
+            row_data['Composition'] = well_name
+        
+        # Add peak data (up to 5 peaks)
+        for i in range(5):  # Support up to 5 peaks
+            if i < len(quality_peaks):
+                peak = quality_peaks[i]
+                row_data[f'Peak_{i+1}_Wavelength'] = peak['center_nm']
+                row_data[f'Peak_{i+1}_Intensity'] = peak['height']
+                row_data[f'Peak_{i+1}_FWHM'] = peak['FWHM_nm']
+                row_data[f'Peak_{i+1}_Area'] = peak['area']
+            else:
+                # Fill empty peaks with NaN
+                row_data[f'Peak_{i+1}_Wavelength'] = np.nan
+                row_data[f'Peak_{i+1}_Intensity'] = np.nan
+                row_data[f'Peak_{i+1}_FWHM'] = np.nan
+                row_data[f'Peak_{i+1}_Area'] = np.nan
+        
+        csv_data.append(row_data)
+    
+    # Create DataFrame
+    df = pd.DataFrame(csv_data)
+    
+    # Create results directory if it doesn't exist
+    os.makedirs(os.path.dirname(csv_filename), exist_ok=True)
+    
+    # Save to CSV
+    df.to_csv(csv_filename, index=False)
+    
+    return csv_filename
+
+
 def assess_fit_quality_with_llm(llm: LLMClient, fit_image_path: str, r2_value: float, well_name: str) -> bool:
     """Let LLM assess fit quality from the fitting plot image."""
     fit_assessment_prompt = f"""
@@ -592,6 +748,67 @@ def assess_fit_quality_with_llm(llm: LLMClient, fit_image_path: str, r2_value: f
     except Exception as e:
         print(f"  Error in LLM fit assessment: {e}, using R² threshold")
         return r2_value > 0.90  # Fallback to R² threshold
+
+
+def llm_refine_peaks_from_residuals(llm: LLMClient, x: np.ndarray, y: np.ndarray, 
+                                   current_peaks: List[PeakGuess], residuals: np.ndarray, 
+                                   well_name: str, max_peaks: int = 3) -> PeakResult:
+    """Let LLM refine peak positions based on fit residuals."""
+    
+    # Create residual analysis for LLM
+    residual_info = f"""
+    Current fit analysis for Well {well_name}:
+    
+    Current peaks:
+    {[f"Peak {i+1}: center={p.center:.1f}nm, height={p.height:.1f}, FWHM={p.fwhm:.1f}nm" 
+      for i, p in enumerate(current_peaks)]}
+    
+    Residual analysis:
+    - Max positive residual: {residuals.max():.1f} (suggests missing peaks or underfit)
+    - Max negative residual: {residuals.min():.1f} (suggests overfit or wrong positions)
+    - Residual std: {residuals.std():.1f}
+    - Residual pattern shows systematic deviations that need correction
+    
+    Based on the residuals, please suggest refined peak positions, heights, and FWHM values.
+    Look for patterns in residuals that indicate:
+    1. Missing peaks (positive residual clusters)
+    2. Peak positions that need adjustment (systematic residual patterns)
+    3. Peak widths that need refinement
+    """
+    
+    refinement_prompt = f"""
+    {residual_info}
+    
+    Please analyze the residuals and provide refined peak parameters.
+    Return ONLY JSON with keys 'peaks' (list) and 'baseline'.
+    
+    Wavelength range: {x.min():.1f} - {x.max():.1f} nm
+    Max peaks allowed: {max_peaks}
+    
+    Focus on fixing systematic residual patterns, not random noise.
+    """
+    
+    try:
+        sys_prompt_refine = get_prompt("refine")  # We'll need to add this prompt
+        response = llm.generate(refinement_prompt, max_tokens=500)
+        obj = _extract_json(response)
+        
+        refined_peaks = [
+            PeakGuess(
+                center=float(p.get("center")),
+                height=float(p.get("height")),
+                fwhm=(float(p["fwhm"]) if p.get("fwhm") is not None else None),
+                prominence=(float(p["prominence"]) if p.get("prominence") is not None else None),
+            )
+            for p in obj.get("peaks", [])
+        ]
+        
+        base = obj.get("baseline")
+        return PeakResult(peaks=refined_peaks, baseline=(float(base) if base is not None else None))
+        
+    except Exception as e:
+        print(f"  LLM refinement failed: {e}, using original peaks")
+        return PeakResult(peaks=current_peaks, baseline=None)
 
 
 def select_model_for_spectrum(llm: LLMClient, x: np.ndarray, y: np.ndarray, well_name: str) -> str:
@@ -641,124 +858,184 @@ def run_complete_analysis(
     config: CurveFittingConfig,
     well_name: str,
     llm: LLMClient,
-    read: int = 1,
-    max_peaks: int = 3,
+    reads: Union[int, List[int], str] = "auto",  # Can be single int, list of ints, or "auto"/"all"
+    max_peaks: int = 4,
     model_kind: Optional[str] = None,
     r2_target: float = 0.90,
-    max_attempts: int = 3
-) -> Dict[str, object]:
-    """Run complete analysis workflow for a single well."""
-    # Get data
-    x, y = get_xy_for_well(config, well_name, read=read)
+    max_attempts: int = 3,
+    save_plots: bool = True  # Set to False to skip saving final PNG files (LLM analysis still runs)
+) -> Union[Dict[str, object], List[Dict[str, object]]]:
+    """Run complete analysis workflow for a single well with flexible read selection."""
     
-    # Let LLM select model type if not specified
+    # Determine which reads to analyze
+    if reads == "auto":
+        # Use the first available read from config
+        curated = curate_dataset(config)
+        available_reads = curated["reads"]
+        target_reads = [available_reads[0]] if available_reads else [1]
+    elif reads == "all":
+        # Use all available reads from config
+        curated = curate_dataset(config)
+        target_reads = curated["reads"]
+    elif isinstance(reads, int):
+        # Single read specified
+        target_reads = [reads]
+    elif isinstance(reads, list):
+        # Multiple specific reads
+        target_reads = reads
+    else:
+        raise ValueError(f"Invalid reads parameter: {reads}. Use int, list of ints, 'auto', or 'all'")
+    
+    print(f"  Analyzing reads: {target_reads}")
+    
+    # Set up shared resources
+    os.makedirs("analysis_output", exist_ok=True)
+    if save_plots:
+        os.makedirs("results", exist_ok=True)
+    
+    # LLM model selection (once per well, not per read)
     if model_kind is None:
         print(f"  Selecting model type for {well_name}...")
-        model_kind = select_model_for_spectrum(llm, x, y, well_name)
+        # Use first read for model selection
+        x_sample, y_sample = get_xy_for_well(config, well_name, read=target_reads[0])
+        model_kind = select_model_for_spectrum(llm, x_sample, y_sample, well_name)
         print(f"  LLM selected model: {model_kind}")
     
-    # LLM numeric analysis
-    sys_prompt_numeric = get_prompt("numeric")
-    llm_result = llm_guess_peaks(llm, x, y, use_image=False, system_prompt=sys_prompt_numeric, max_peaks=max_peaks)
+    # Analyze all target reads efficiently
+    all_read_results = []
     
-    # Create output folder for images
-    os.makedirs("analysis_output", exist_ok=True)
-    
-    # Save spectrum image and analyze with LLM
-    spectrum_image_path = f'analysis_output/spectrum_{well_name}.png'
-    save_plot_png(x, y, spectrum_image_path, title=f'PL Spectrum - Well {well_name}')
-    
-    sys_prompt_image = get_prompt("image")
-    llm_image_result = llm_guess_peaks_from_image(llm, spectrum_image_path, system_prompt=sys_prompt_image, max_peaks=max_peaks)
-    
-    # lmfit fitting with automatic model retry for poor fits
-    fit_result = fit_peaks_lmfit_with_retry(
-        x, y, llm_result, 
-        model_kind=model_kind,
-        r2_target=0.92,  # Higher target
-        max_attempts=max_attempts
-    )
-    
-    # Save initial fitting plot for LLM assessment
-    temp_plot_path = f'analysis_output/temp_fit_{well_name}.png'
-    save_fitting_plot_png(x, y, fit_result, temp_plot_path, 
-                          title=f'Initial Fit - Well {well_name}')
-    
-    # LLM visual assessment of fit quality
-    llm_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, fit_result.stats.r2, well_name)
-    
-    # Retry logic: continue until R² > 0.9 AND LLM says it's good
-    retry_count = 0
-    max_retries = 8  # Increased retry attempts
-    alternative_models = ['gaussian', 'voigt', 'lorentzian', 'pseudovoigt', 'skewed_gaussian']
-    if model_kind in alternative_models:
-        alternative_models.remove(model_kind)  # Don't retry the same model first
-    
-    best_fit = fit_result
-    
-    while (fit_result.stats.r2 < 0.90 or not llm_assessment) and retry_count < max_retries:
-        retry_count += 1
-        print(f"  Attempt {retry_count}: R²={fit_result.stats.r2:.3f}, LLM assessment={'good' if llm_assessment else 'poor'}")
+    for read in target_reads:
+        print(f"    Processing read {read}...")
+        x, y = get_xy_for_well(config, well_name, read=read)
         
-        # Try alternative models
-        alt_model = alternative_models[retry_count % len(alternative_models)]
+        # LLM numeric analysis
+        sys_prompt_numeric = get_prompt("numeric")
+        llm_result = llm_guess_peaks(llm, x, y, use_image=False, system_prompt=sys_prompt_numeric, max_peaks=max_peaks)
+        
+        # LLM image analysis (create temp image, analyze, delete immediately)
+        temp_spectrum_path = f'analysis_output/temp_spectrum_{well_name}_read{read}.png'
+        save_plot_png(x, y, temp_spectrum_path, title=f'PL Spectrum - Well {well_name} Read {read}')
+        
+        sys_prompt_image = get_prompt("image")
+        llm_image_result = llm_guess_peaks_from_image(llm, temp_spectrum_path, system_prompt=sys_prompt_image, max_peaks=max_peaks)
+        
+        # Clean up temp spectrum immediately
         try:
-            alt_result = fit_peaks_lmfit_with_retry(
-                x, y, llm_result, 
-                model_kind=alt_model,
-                r2_target=0.92,
-                max_attempts=3
-            )
+            os.remove(temp_spectrum_path)
+        except:
+            pass
+        
+        # lmfit fitting with retry logic
+        fit_result = fit_peaks_lmfit_with_retry(
+            x, y, llm_result, 
+            model_kind=model_kind,
+            r2_target=0.92,
+            max_attempts=max_attempts
+        )
+        
+        # LLM visual assessment (create temp plot, assess, delete)
+        temp_plot_path = f'analysis_output/temp_fit_{well_name}_read{read}.png'
+        save_fitting_plot_png(x, y, fit_result, temp_plot_path, 
+                              title=f'Initial Fit - Well {well_name} Read {read}')
+        
+        llm_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, fit_result.stats.r2, well_name)
+        
+        # Retry logic with alternative models
+        retry_count = 0
+        max_retries = 3
+        alternative_models = ['gaussian', 'voigt', 'lorentzian', 'pseudovoigt', 'skewed_gaussian']
+        if model_kind in alternative_models:
+            alternative_models.remove(model_kind)
+        
+        best_fit = fit_result
+        
+        while (fit_result.stats.r2 < r2_target or not llm_assessment) and retry_count < max_retries:
+            retry_count += 1
+            print(f"      Attempt {retry_count}: R²={fit_result.stats.r2:.3f}, LLM={'good' if llm_assessment else 'poor'}")
             
-            if alt_result and alt_result.stats.r2 > best_fit.stats.r2:
-                # Test this alternative with LLM
-                save_fitting_plot_png(x, y, alt_result, temp_plot_path, 
-                                     title=f'Alternative Fit ({alt_model}) - Well {well_name}')
-                alt_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, alt_result.stats.r2, well_name)
+            alt_model = alternative_models[retry_count % len(alternative_models)]
+            
+            # LLM refinement based on residuals
+            if fit_result.lmfit_result is not None:
+                current_residuals = y - fit_result.lmfit_result.best_fit
+                refined_peaks = llm_refine_peaks_from_residuals(
+                    llm, x, y, fit_result.peaks, current_residuals, well_name, max_peaks
+                )
+                print(f"      LLM refined peaks: {len(refined_peaks.peaks)} peaks")
+            else:
+                refined_peaks = llm_result
+            
+            try:
+                alt_result = fit_peaks_lmfit_with_retry(
+                    x, y, refined_peaks,
+                    model_kind=alt_model,
+                    r2_target=0.92,
+                    max_attempts=2
+                )
                 
-                if alt_result.stats.r2 > 0.90 and alt_assessment:
-                    print(f"  Success with {alt_model}: R²={alt_result.stats.r2:.3f}, LLM=good")
-                    best_fit = alt_result
-                    break
-                elif alt_result.stats.r2 > best_fit.stats.r2:
-                    print(f"  Improved with {alt_model}: R²={alt_result.stats.r2:.3f}")
-                    best_fit = alt_result
+                if alt_result and alt_result.stats.r2 > best_fit.stats.r2:
+                    save_fitting_plot_png(x, y, alt_result, temp_plot_path, 
+                                         title=f'Alt Fit ({alt_model}) - {well_name} Read {read}')
+                    alt_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, alt_result.stats.r2, well_name)
                     
-        except Exception as e:
-            print(f"  Alternative model {alt_model} failed: {e}")
-            continue
+                    if alt_result.stats.r2 > r2_target and alt_assessment:
+                        print(f"      Success with {alt_model}: R²={alt_result.stats.r2:.3f}")
+                        best_fit = alt_result
+                        break
+                    elif alt_result.stats.r2 > best_fit.stats.r2:
+                        print(f"      Improved with {alt_model}: R²={alt_result.stats.r2:.3f}")
+                        best_fit = alt_result
+                        
+            except Exception as e:
+                print(f"      Alternative model {alt_model} failed: {e}")
+                continue
+            
+            fit_result = best_fit
+            llm_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, fit_result.stats.r2, well_name)
+        
+        # Clean up temp plot
+        try:
+            os.remove(temp_plot_path)
+        except:
+            pass
         
         fit_result = best_fit
-        llm_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, fit_result.stats.r2, well_name)
+        
+        # Save final plot (only if requested)
+        if save_plots:
+            if len(target_reads) > 1:
+                # Multiple reads: include read number in filename
+                fitting_plot_file = save_fitting_plot_png(x, y, fit_result, f'results/fit_results_{well_name}_read{read}.png', 
+                                                         title=f'Peak Fitting - {well_name} Read {read}')
+            else:
+                # Single read: use simple filename
+                fitting_plot_file = save_fitting_plot_png(x, y, fit_result, f'results/fit_results_{well_name}.png', 
+                                                         title=f'Peak Fitting - {well_name}')
+            files_dict = {'fitting_plot': fitting_plot_file}
+        else:
+            files_dict = {}
+        
+        # Quality assessment
+        quality_assessment = assess_fitting_quality(fit_result)
+        
+        # Store result
+        result = {
+            'well_name': well_name,
+            'read': read,
+            'data': {'x': x, 'y': y},
+            'llm_numeric_result': llm_result,
+            'llm_image_result': llm_image_result,
+            'fit_result': fit_result,
+            'files': files_dict,
+            'quality_assessment': quality_assessment
+        }
+        all_read_results.append(result)
     
-    # Clean up temp file
-    try:
-        os.remove(temp_plot_path)
-    except:
-        pass
-    
-    fit_result = best_fit
-    
-    # Save fitting plot in output folder
-    fitting_plot_file = save_fitting_plot_png(x, y, fit_result, f'analysis_output/fit_results_{well_name}.png', 
-                                             title=f'Peak Fitting Results - Well {well_name}')
-    
-    # Quality assessment
-    quality_assessment = assess_fitting_quality(fit_result)
-    
-    return {
-        'well_name': well_name,
-        'read': read,
-        'data': {'x': x, 'y': y},
-        'llm_numeric_result': llm_result,
-        'llm_image_result': llm_image_result,
-        'fit_result': fit_result,
-        'files': {
-            'spectrum_image': spectrum_image_path,
-            'fitting_plot': fitting_plot_file
-        },
-        'quality_assessment': quality_assessment
-    }
+    # Return single result for backward compatibility, or list for multiple reads
+    if len(all_read_results) == 1:
+        return all_read_results[0]
+    else:
+        return all_read_results
 
 
 # ---------- LLM peak guessing helpers ----------
@@ -1063,22 +1340,7 @@ def fit_peaks_lmfit_with_retry(
     xmin, xmax = float(np.min(x)), float(np.max(x))
     span = xmax - xmin
 
-    def _jitter(pr: PeakResult) -> PeakResult:
-        new_peaks: List[PeakGuess] = []
-        for pk in pr.peaks:
-            c = pk.center + rng.uniform(-jitter_frac_center, jitter_frac_center) * span
-            if pk.fwhm and pk.fwhm > 0:
-                sig = _estimate_sigma_from_fwhm(pk.fwhm)
-                sig *= (1.0 + rng.uniform(-jitter_frac_sigma, jitter_frac_sigma))
-                fwhm = 2.354820045 * max(sig, 1e-6)
-            else:
-                fwhm = None
-            h = max(1e-12, pk.height * (1.0 + rng.uniform(-0.15, 0.15)))
-            new_peaks.append(PeakGuess(center=float(c), height=float(h), fwhm=(float(fwhm) if fwhm else None)))
-        base = pr.baseline
-        if allow_baseline_refit and base is not None:
-            base = base * (1.0 + rng.uniform(-0.10, 0.10))
-        return PeakResult(peaks=new_peaks, baseline=(float(base) if base is not None else None))
+    # Removed random jittering - using LLM-based refinement instead
 
     best_result = None
     best_stats = None
@@ -1095,7 +1357,7 @@ def fit_peaks_lmfit_with_retry(
         try:
             result = _fit_once(x, y, current_seed.peaks, current_seed.baseline, model_kind=model_kind)
         except Exception:
-            current_seed = _jitter(seed)
+            # Skip this attempt if fitting fails
             continue
 
         yhat = result.best_fit
@@ -1121,7 +1383,7 @@ def fit_peaks_lmfit_with_retry(
             success = True
             break
 
-        current_seed = _jitter(seed)
+        # For subsequent attempts, we'll rely on model switching in run_complete_analysis
 
     if best_result is None or best_stats is None:
         raise RuntimeError("lmfit did not produce a valid result across attempts")

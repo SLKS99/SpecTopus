@@ -127,7 +127,29 @@ Output JSON:
       "baseline": number|null
     },
     ...
-  }
+    }
+}
+""",
+
+    "refine": """You are a peak fitting expert analyzing residuals to improve peak parameters.
+
+Given current peak parameters and residual analysis, suggest refined peak positions, heights, and FWHM values.
+
+Key principles:
+1. Positive residual clusters suggest missing peaks or underestimated heights
+2. Negative residual clusters suggest overestimated heights or wrong positions  
+3. Systematic residual patterns indicate peak position/width adjustments needed
+4. Focus on fixing systematic deviations, not random noise
+
+Return ONLY JSON with keys 'peaks' (list) and 'baseline'. No explanations.
+
+Example output:
+{
+  "peaks": [
+    { "center": 650.5, "height": 1200.0, "fwhm": 25.0, "prominence": null },
+    { "center": 720.2, "height": 800.0, "fwhm": 18.0, "prominence": null }
+  ],
+  "baseline": 50.0
 }
 """,
 }
