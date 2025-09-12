@@ -16,44 +16,159 @@ from .instruct import get_prompt
 
 # ---------- LLM client (Gemini) ----------
 
+# try:
+#     import google.generativeai as genai  # type: ignore
+# except ImportError:
+#     genai = None
+
+
+# class LLMClient:
+#     """Lightweight wrapper for Gemini text and multimodal calls."""
+
+#     def __init__(self, api_key: Optional[str] = None, model_id: str = "gemini-1.5-flash"):
+#         key = api_key or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+#         if not key:
+#             raise ValueError(
+#                 "No API key found. Provide api_key or set GOOGLE_API_KEY/GEMINI_API_KEY in your environment."
+#             )
+#         if genai is None:
+#             raise ImportError("google-generativeai not installed. pip install google-generativeai")
+
+#         genai.configure(api_key=key)
+#         self.model = genai.GenerativeModel(model_id)
+
+#     def generate(self, prompt: str, max_tokens: int = 1500) -> str:
+#         """Text-only prompt. Returns plain text."""
+#         try:
+#             resp = self.model.generate_content(prompt, generation_config={"max_output_tokens": int(max_tokens)})
+#             return getattr(resp, "text", "") or ""
+#         except Exception as e:
+#             logging.error(f"LLM text generation failed: {e}")
+#             raise
+
+#     def generate_multimodal(self, parts: List[Any], max_tokens: int = 1500) -> str:
+#         """Multimodal prompt with [text, image, ...] parts."""
+#         try:
+#             resp = self.model.generate_content(parts, generation_config={"max_output_tokens": int(max_tokens)})
+#             return getattr(resp, "text", "") or ""
+#         except Exception as e:
+#             logging.error(f"LLM multimodal generation failed: {e}")
+#             raise
+
+#. -----kamyar added ----....
+
 try:
     import google.generativeai as genai  # type: ignore
 except ImportError:
     genai = None
 
+try:
+    from openai import OpenAI  # OpenAI official client
+except ImportError:
+    OpenAI = None
+
+try:
+    import anthropic  # Anthropic client
+except ImportError:
+    anthropic = None
+
 
 class LLMClient:
-    """Lightweight wrapper for Gemini text and multimodal calls."""
+    """Wrapper for multiple LLM providers (Gemini, OpenAI, Anthropic)."""
 
-    def __init__(self, api_key: Optional[str] = None, model_id: str = "gemini-1.5-flash"):
-        key = api_key or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        if not key:
-            raise ValueError(
-                "No API key found. Provide api_key or set GOOGLE_API_KEY/GEMINI_API_KEY in your environment."
-            )
-        if genai is None:
-            raise ImportError("google-generativeai not installed. pip install google-generativeai")
+    def __init__(
+        self,
+        provider: str = "gemini",
+        model_id: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
+        self.provider = provider.lower()
 
-        genai.configure(api_key=key)
-        self.model = genai.GenerativeModel(model_id)
+        if self.provider == "gemini":
+            key = api_key or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            if not key:
+                raise ValueError("No Gemini API key found. Set GOOGLE_API_KEY or GEMINI_API_KEY.")
+            if genai is None:
+                raise ImportError("google-generativeai not installed. pip install google-generativeai")
+            genai.configure(api_key=key)
+            self.model = genai.GenerativeModel(model_id or "gemini-1.5-flash")
+
+        elif self.provider == "openai":
+            key = api_key or os.environ.get("OPENAI_API_KEY")
+            if not key:
+                raise ValueError("No OpenAI API key found. Set OPENAI_API_KEY.")
+            if OpenAI is None:
+                raise ImportError("openai not installed. pip install openai")
+            self.client = OpenAI(api_key=key)
+            self.model_id = model_id or "gpt-4o-mini"
+
+        elif self.provider == "anthropic":
+            key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+            if not key:
+                raise ValueError("No Anthropic API key found. Set ANTHROPIC_API_KEY.")
+            if anthropic is None:
+                raise ImportError("anthropic not installed. pip install anthropic")
+            self.client = anthropic.Anthropic(api_key=key)
+            self.model_id = model_id or "claude-3-haiku-20240307"
+
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
 
     def generate(self, prompt: str, max_tokens: int = 1500) -> str:
-        """Text-only prompt. Returns plain text."""
+        """Text-only generation across providers."""
         try:
-            resp = self.model.generate_content(prompt, generation_config={"max_output_tokens": int(max_tokens)})
-            return getattr(resp, "text", "") or ""
+            if self.provider == "gemini":
+                resp = self.model.generate_content(prompt, generation_config={"max_output_tokens": int(max_tokens)})
+                return getattr(resp, "text", "") or ""
+
+            elif self.provider == "openai":
+                resp = self.client.chat.completions.create(
+                    model=self.model_id,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                )
+                return resp.choices[0].message.content
+
+            elif self.provider == "anthropic":
+                resp = self.client.messages.create(
+                    model=self.model_id,
+                    max_tokens=max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return resp.content[0].text if resp.content else ""
+
         except Exception as e:
-            logging.error(f"LLM text generation failed: {e}")
+            logging.error(f"LLM text generation failed ({self.provider}): {e}")
             raise
 
     def generate_multimodal(self, parts: List[Any], max_tokens: int = 1500) -> str:
-        """Multimodal prompt with [text, image, ...] parts."""
+        """Multimodal prompt (text+image). Currently only supported for Gemini and OpenAI."""
         try:
-            resp = self.model.generate_content(parts, generation_config={"max_output_tokens": int(max_tokens)})
-            return getattr(resp, "text", "") or ""
+            if self.provider == "gemini":
+                resp = self.model.generate_content(parts, generation_config={"max_output_tokens": int(max_tokens)})
+                return getattr(resp, "text", "") or ""
+
+            elif self.provider == "openai":
+                resp = self.client.chat.completions.create(
+                    model=self.model_id,
+                    messages=[
+                        {"role": "user", "content": [
+                            {"type": "text", "text": str(parts[0])}] +
+                            [{"type": "image_url", "image_url": {"url": p}} for p in parts[1:] if isinstance(p, str)]
+                        }
+                    ],
+                    max_tokens=max_tokens,
+                )
+                return resp.choices[0].message.content
+
+            elif self.provider == "anthropic":
+                raise NotImplementedError("Anthropic does not yet support multimodal input in this wrapper.")
+
         except Exception as e:
-            logging.error(f"LLM multimodal generation failed: {e}")
+            logging.error(f"LLM multimodal generation failed ({self.provider}): {e}")
             raise
+
+
 
 
 # ---------- Peak guess dataclasses ----------
