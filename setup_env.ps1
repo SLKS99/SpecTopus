@@ -4,8 +4,10 @@ Write-Host "Setting up SpecTopus environment..." -ForegroundColor Green
 # Activate virtual environment
 & "venv\Scripts\Activate.ps1"
 
-# Set API key
+
+
 $env:GOOGLE_API_KEY="your-api=key"
+
 
 # Verify setup
 Write-Host "✅ Virtual environment activated" -ForegroundColor Green
