@@ -108,54 +108,78 @@ SpecTopus/
 
 ## Usage
 
-Run the demonstration with your PL spectrum data:
+### As a library (recommended)
+
+Install locally (editable) and import:
+```bash
+pip install -e .
+```
+
+Example:
+```python
+from spectopus.tools import (
+    LLMClient,
+    build_agent_config,
+    run_complete_analysis,
+    save_all_wells_results,
+    export_peak_data_to_csv,
+)
+
+# Configure LLM (Gemini) with optional throttle
+llm = LLMClient(provider="gemini", api_key="YOUR_KEY", min_delay_seconds=1.0)
+
+# Build data config
+cfg = build_agent_config(
+    data_csv="your_data.csv",
+    composition_csv="your_composition.csv",
+    read_selection="all",
+    start_wavelength=420,
+    end_wavelength=860,
+    wavelength_step_size=2,
+)
+
+# Analyze a well
+result = run_complete_analysis(
+    cfg,
+    well_name="A1",
+    llm=llm,
+    reads="auto",
+    max_peaks=4,
+    r2_target=0.90,
+    max_attempts=3,
+    save_plots=True,
+)
+
+# Save consolidated results
+all_results = [result] if not isinstance(result, list) else result
+save_all_wells_results(all_results, "results/all_wells_comprehensive_analysis.json")
+export_peak_data_to_csv(all_results, "results/peak_data_export.csv")
+```
+
+### Run the demo script
 
 ```bash
 python fitting_agent_demo.py
 ```
 
-### Configuration Options
+Key configuration in `fitting_agent_demo.py`:
+- `DATA_FILE`, `COMPOSITION_FILE`
+- `READS_TO_ANALYZE`:
+  - int (e.g., `59`)
+  - list of ints (e.g., `[1, 2, 3]`)
+  - string "auto" / "all"
+  - comma/range string (e.g., `"2"` or `"1,3-5"`)
+- `WAVELENGTH_START/END`, `MAX_PEAKS`, `R2_TARGET`, `MAX_ATTEMPTS`
+- `SAVE_PNG_PLOTS`, `EXPORT_CSV`
+- `wells_to_ignore`: list or comma string (e.g., `"A1,B3"`) to drop wells
 
-You can adjust various parameters in `fitting_agent_demo.py`:
-
-- `DATA_FILE`: Your PL spectrum data CSV file
-- `COMPOSITION_FILE`: Composition mapping CSV file
-- `READS_TO_ANALYZE`: Which read(s) to analyze (single, multiple, or all)
-- `WAVELENGTH_START/END`: Wavelength range for analysis
-- `MAX_PEAKS`: Maximum peaks to find per spectrum
-- `R2_TARGET`: Minimum R² for good fits
-- `MAX_ATTEMPTS`: Retry attempts for poor fits
-
-### Visualization Features
-
-The demo provides multiple ways to visualize and validate results:
-
-1. **Real-time Analysis View**:
-   - Side-by-side comparison of raw and fitted data
-   - Live peak identification and fitting
-   - Quality metrics tracking
-
-2. **Interactive Dashboard**:
-   - Peak distribution analysis
-   - R² score distribution
-   - Peak characteristics visualization
-   - Model performance summary
-
-3. **Quality Assessment**:
-   - Color-coded quality indicators
-   - Progress tracking
-   - Automated validation of fits
-
-### Output Files
-
-The analysis generates several outputs:
-
-- `analysis_output/`: PNG plots showing fitting results
-- `analysis_output/analysis_dashboard.html`: Interactive analysis dashboard
-- `results/`: 
-  - `all_wells_comprehensive_analysis.json`: Complete analysis results
-  - `analysis_summary.txt`: Summary statistics
-  - Individual well fitting results as PNG files
+### Outputs
+- `analysis_output/`: PNG plots
+- `results/`:
+  - `all_wells_comprehensive_analysis.json`
+  - `analysis_summary.txt`
+  - `fit_results_<well>.png` per well
+  - `peak_data_export.csv`
 
 ## Dependencies
 

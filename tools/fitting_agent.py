@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -85,6 +86,8 @@ class LLMClient:
         provider: str = "gemini",
         model_id: Optional[str] = None,
         api_key: Optional[str] = None,
+        *,
+        min_delay_seconds: Optional[float] = None,  # optional throttle between Gemini calls
     ):
         self.provider = provider.lower()
 
@@ -94,8 +97,37 @@ class LLMClient:
                 raise ValueError("No Gemini API key found. Set GOOGLE_API_KEY or GEMINI_API_KEY.")
             if genai is None:
                 raise ImportError("google-generativeai not installed. pip install google-generativeai")
+
+            # Store API key and model_id for reference
+            self.api_key = key
+            self.model_id = model_id or "gemini-1.5-flash"
+
+            # Optional throttle between Gemini calls to reduce RPD spikes
+            env_delay_ms = os.environ.get("GEMINI_MIN_DELAY_MS")
+            env_delay_s = os.environ.get("GEMINI_MIN_DELAY_S")
+            self.min_delay = (
+                float(env_delay_ms) / 1000.0
+                if env_delay_ms is not None
+                else (float(env_delay_s) if env_delay_s is not None else min_delay_seconds)
+            )
+            # Track last call time for throttling
+            self._last_call_ts = 0.0
+
+            # Ensure API key is in environment (required by some versions of the library)
+            os.environ['GOOGLE_API_KEY'] = key
+            os.environ['GEMINI_API_KEY'] = key
+
+            # Configure genai with API key (must be done before creating model)
             genai.configure(api_key=key)
-            self.model = genai.GenerativeModel(model_id or "gemini-1.5-flash")
+
+            # Create the model (must be created after configure)
+            try:
+                self.model = genai.GenerativeModel(self.model_id)
+            except Exception as e:
+                # If model creation fails, log error and re-raise
+                logging.error(f"Failed to create Gemini model {self.model_id}: {e}")
+                logging.error(f"API key present: {bool(key)}, Key length: {len(key) if key else 0}")
+                raise
 
         elif self.provider == "openai":
             key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -118,12 +150,67 @@ class LLMClient:
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
+    def _throttle(self):
+        """Simple delay between Gemini calls to keep RPD down."""
+        if self.provider != "gemini":
+            return
+        if self.min_delay and self.min_delay > 0:
+            now = time.monotonic()
+            elapsed = now - self._last_call_ts
+            if elapsed < self.min_delay:
+                time.sleep(self.min_delay - elapsed)
+            self._last_call_ts = time.monotonic()
+
     def generate(self, prompt: str, max_tokens: int = 1500) -> str:
         """Text-only generation across providers."""
         try:
             if self.provider == "gemini":
+                self._throttle()
+                # ALWAYS reconfigure genai before each call to ensure API key is set
+                # This matches the working test_api_key.py pattern
+                if not hasattr(self, 'api_key') or not self.api_key:
+                    raise ValueError("API key not found in LLMClient instance")
+                
+                if not hasattr(self, 'model_id') or not self.model_id:
+                    raise ValueError("Model ID not found in LLMClient instance")
+                
+                # Ensure environment has the key
+                os.environ['GOOGLE_API_KEY'] = self.api_key
+                os.environ['GEMINI_API_KEY'] = self.api_key
+                
+                # Always reconfigure - this is what makes test_api_key.py work
+                # This MUST be done before creating the model
+                genai.configure(api_key=self.api_key)
+                
+                # Recreate model to ensure it uses the freshly configured API key
+                # (Some versions of the library cache the config when model is created)
+                try:
+                    self.model = genai.GenerativeModel(self.model_id)
+                except Exception as model_error:
+                    logging.error(f"Failed to recreate Gemini model: {model_error}")
+                    logging.error(f"Model ID: {self.model_id}")
+                    logging.error(f"API key present: {bool(self.api_key)}, length: {len(self.api_key) if self.api_key else 0}")
+                    raise
+                
+                # Make the API call - the model should use the configured API key
                 resp = self.model.generate_content(prompt, generation_config={"max_output_tokens": int(max_tokens)})
-                return getattr(resp, "text", "") or ""
+                # Check if response has valid candidates with parts
+                if resp.candidates and len(resp.candidates) > 0:
+                    candidate = resp.candidates[0]
+                    # Check finish_reason - 2 means BLOCKED
+                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason == 2:
+                        raise ValueError(f"Gemini response was blocked (finish_reason=2). This may indicate content filtering or safety restrictions.")
+                    # Check if candidate has parts
+                    if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts'):
+                        if len(candidate.content.parts) > 0:
+                            return candidate.content.parts[0].text
+                # Fallback: try the text property, but handle errors gracefully
+                try:
+                    return resp.text
+                except ValueError as e:
+                    if "finish_reason" in str(e) or "Part" in str(e):
+                        raise ValueError(f"Gemini response has no valid content. finish_reason may indicate blocking or filtering.")
+                    raise
 
             elif self.provider == "openai":
                 resp = self.client.chat.completions.create(
@@ -142,15 +229,70 @@ class LLMClient:
                 return resp.content[0].text if resp.content else ""
 
         except Exception as e:
-            logging.error(f"LLM text generation failed ({self.provider}): {e}")
+            error_msg = str(e)
+            # Enhanced error logging for API key issues
+            if "API_KEY_INVALID" in error_msg or "API Key not found" in error_msg:
+                logging.error(f"LLM text generation failed ({self.provider}): API key issue")
+                logging.error(f"Error details: {error_msg}")
+                if hasattr(self, 'api_key'):
+                    logging.error(f"API key present in LLMClient: {bool(self.api_key)}")
+                    logging.error(f"API key in environment: {bool(os.environ.get('GOOGLE_API_KEY'))}")
+                else:
+                    logging.error("API key not found in LLMClient instance")
+            else:
+                logging.error(f"LLM text generation failed ({self.provider}): {e}")
             raise
 
     def generate_multimodal(self, parts: List[Any], max_tokens: int = 1500) -> str:
         """Multimodal prompt (text+image). Currently only supported for Gemini and OpenAI."""
         try:
             if self.provider == "gemini":
+                self._throttle()
+                # ALWAYS reconfigure genai before each call to ensure API key is set
+                # This matches the working test_api_key.py pattern
+                if not hasattr(self, 'api_key') or not self.api_key:
+                    raise ValueError("API key not found in LLMClient instance")
+                
+                if not hasattr(self, 'model_id') or not self.model_id:
+                    raise ValueError("Model ID not found in LLMClient instance")
+                
+                # Ensure environment has the key
+                os.environ['GOOGLE_API_KEY'] = self.api_key
+                os.environ['GEMINI_API_KEY'] = self.api_key
+                
+                # Always reconfigure - this is what makes test_api_key.py work
+                # This MUST be done before creating the model
+                genai.configure(api_key=self.api_key)
+                
+                # Recreate model to ensure it uses the freshly configured API key
+                # (Some versions of the library cache the config when model is created)
+                try:
+                    self.model = genai.GenerativeModel(self.model_id)
+                except Exception as model_error:
+                    logging.error(f"Failed to recreate Gemini model: {model_error}")
+                    logging.error(f"Model ID: {self.model_id}")
+                    logging.error(f"API key present: {bool(self.api_key)}, length: {len(self.api_key) if self.api_key else 0}")
+                    raise
+                
+                # Make the API call - the model should use the configured API key
                 resp = self.model.generate_content(parts, generation_config={"max_output_tokens": int(max_tokens)})
-                return getattr(resp, "text", "") or ""
+                # Check if response has valid candidates with parts
+                if resp.candidates and len(resp.candidates) > 0:
+                    candidate = resp.candidates[0]
+                    # Check finish_reason - 2 means BLOCKED
+                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason == 2:
+                        raise ValueError(f"Gemini response was blocked (finish_reason=2). This may indicate content filtering or safety restrictions.")
+                    # Check if candidate has parts
+                    if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts'):
+                        if len(candidate.content.parts) > 0:
+                            return candidate.content.parts[0].text
+                # Fallback: try the text property, but handle errors gracefully
+                try:
+                    return resp.text
+                except ValueError as e:
+                    if "finish_reason" in str(e) or "Part" in str(e):
+                        raise ValueError(f"Gemini response has no valid content. finish_reason may indicate blocking or filtering.")
+                    raise
 
             elif self.provider == "openai":
                 resp = self.client.chat.completions.create(
@@ -276,6 +418,66 @@ def pick_good_peaks(
                 'frac'     : float(frac),
             })
     return accepted
+
+
+def compute_peak_asymmetry(
+    x: np.ndarray,
+    y: np.ndarray,
+    peaks: List[PeakGuess],
+    baseline: Optional[float] = None,
+) -> List[Dict[str, float]]:
+    """
+    Estimate left/right area asymmetry for each peak using partitioned windows.
+    We partition the spectrum at midpoints between neighboring peak centers and
+    integrate the baseline-subtracted signal on each side of the peak center.
+    Returns list aligned with peaks: {left_area, right_area, asymmetry_ratio}.
+    """
+    if not len(peaks):
+        return []
+    # Sort peaks by center and keep mapping
+    indexed = sorted(enumerate(peaks), key=lambda p: p[1].center)
+    centers = [p.center for _, p in indexed]
+    x_min, x_max = float(np.min(x)), float(np.max(x))
+
+    # Precompute midpoints between adjacent peaks
+    midpoints = []
+    for i in range(len(centers) - 1):
+        midpoints.append(0.5 * (centers[i] + centers[i + 1]))
+
+    # Baseline-subtracted signal
+    y_base = y - (baseline if baseline is not None else 0.0)
+
+    results = [None] * len(peaks)
+    for idx_pos, (orig_idx, pk) in enumerate(indexed):
+        left_bound = midpoints[idx_pos - 1] if idx_pos > 0 else x_min
+        right_bound = midpoints[idx_pos] if idx_pos < len(midpoints) else x_max
+
+        # Mask window for this peak
+        win_mask = (x >= left_bound) & (x <= right_bound)
+        if not np.any(win_mask):
+            results[orig_idx] = {"left_area": 0.0, "right_area": 0.0, "asymmetry_ratio": np.nan}
+            continue
+
+        x_win = x[win_mask]
+        y_win = y_base[win_mask]
+
+        # Split at peak center
+        left_mask = x_win <= pk.center
+        right_mask = x_win >= pk.center
+
+        left_area = float(np.trapz(y_win[left_mask], x_win[left_mask])) if np.any(left_mask) else 0.0
+        right_area = float(np.trapz(y_win[right_mask], x_win[right_mask])) if np.any(right_mask) else 0.0
+
+        denom = left_area + right_area
+        asym_ratio = (right_area - left_area) / denom if denom != 0 else 0.0
+
+        results[orig_idx] = {
+            "left_area": left_area,
+            "right_area": right_area,
+            "asymmetry_ratio": asym_ratio,
+        }
+
+    return results
 
 
 # ---------- lmfit multi-peak fitting with retry ----------
@@ -485,16 +687,23 @@ def save_all_wells_results(all_results: List[Dict[str, object]], filename: str =
     for result in all_results:
         well_name = result['well_name']
         fit_result = result['fit_result']
+        x_arr = result['data']['x']
+        y_arr = result['data']['y']
         
         # Extract peak information with all details
         peaks_data = []
+        asym_data = compute_peak_asymmetry(x_arr, y_arr, fit_result.peaks, baseline=fit_result.baseline)
         for i, peak in enumerate(fit_result.peaks):
+            asym = asym_data[i] if i < len(asym_data) else {"left_area": None, "right_area": None, "asymmetry_ratio": None}
             peak_data = {
                 'peak_number': i + 1,
                 'position_nm': float(peak.center),
                 'intensity': float(peak.height),
                 'fwhm_nm': float(peak.fwhm) if peak.fwhm else None,
-                'prominence': float(peak.prominence) if peak.prominence else None
+                'prominence': float(peak.prominence) if peak.prominence else None,
+                'left_area': asym.get("left_area"),
+                'right_area': asym.get("right_area"),
+                'asymmetry_ratio': asym.get("asymmetry_ratio"),
             }
             peaks_data.append(peak_data)
         
@@ -576,6 +785,9 @@ def export_peak_data_to_csv(all_results: List[Dict[str, object]], filename: str 
         # Get quality peaks and metrics directly from the result
         # (These were already processed by save_all_wells_results)
         fit_result = result['fit_result']
+        x_arr = result['data']['x']
+        y_arr = result['data']['y']
+        asym_data = compute_peak_asymmetry(x_arr, y_arr, fit_result.peaks, baseline=fit_result.baseline)
         
         # Check if this result has quality_peaks already processed
         if 'quality_peaks' in result:
@@ -620,12 +832,20 @@ def export_peak_data_to_csv(all_results: List[Dict[str, object]], filename: str 
                 row_data[f'Peak_{i+1}_Intensity'] = peak['height']
                 row_data[f'Peak_{i+1}_FWHM'] = peak['FWHM_nm']
                 row_data[f'Peak_{i+1}_Area'] = peak['area']
+                # Map asymmetry from fitted peaks if available
+                if i < len(asym_data):
+                    row_data[f'Peak_{i+1}_LeftArea'] = asym_data[i].get("left_area")
+                    row_data[f'Peak_{i+1}_RightArea'] = asym_data[i].get("right_area")
+                    row_data[f'Peak_{i+1}_Asymmetry'] = asym_data[i].get("asymmetry_ratio")
             else:
                 # Fill empty peaks with NaN
                 row_data[f'Peak_{i+1}_Wavelength'] = np.nan
                 row_data[f'Peak_{i+1}_Intensity'] = np.nan
                 row_data[f'Peak_{i+1}_FWHM'] = np.nan
                 row_data[f'Peak_{i+1}_Area'] = np.nan
+                row_data[f'Peak_{i+1}_LeftArea'] = np.nan
+                row_data[f'Peak_{i+1}_RightArea'] = np.nan
+                row_data[f'Peak_{i+1}_Asymmetry'] = np.nan
         
         csv_data.append(row_data)
     
@@ -744,7 +964,10 @@ def assess_fit_quality_with_llm(llm: LLMClient, fit_image_path: str, r2_value: f
         parts = [fit_assessment_prompt, image]
         response = llm.generate_multimodal(parts, max_tokens=50)
         assessment = response.strip().lower()
-        return "good" in assessment
+        # If LLM doesn't say "good" but R² is solid, fall back to numeric threshold
+        if "good" in assessment:
+            return True
+        return r2_value > 0.90
     except Exception as e:
         print(f"  Error in LLM fit assessment: {e}, using R² threshold")
         return r2_value > 0.90  # Fallback to R² threshold
@@ -858,7 +1081,7 @@ def run_complete_analysis(
     config: CurveFittingConfig,
     well_name: str,
     llm: LLMClient,
-    reads: Union[int, List[int], str] = "auto",  # Can be single int, list of ints, or "auto"/"all"
+    reads: Union[int, List[int], str] = "auto",  # int, list[int], "auto", "all", or str like "2" / "1,3-5"
     max_peaks: int = 4,
     model_kind: Optional[str] = None,
     r2_target: float = 0.90,
@@ -868,23 +1091,23 @@ def run_complete_analysis(
     """Run complete analysis workflow for a single well with flexible read selection."""
     
     # Determine which reads to analyze
-    if reads == "auto":
-        # Use the first available read from config
-        curated = curate_dataset(config)
-        available_reads = curated["reads"]
-        target_reads = [available_reads[0]] if available_reads else [1]
-    elif reads == "all":
-        # Use all available reads from config
-        curated = curate_dataset(config)
-        target_reads = curated["reads"]
+    if isinstance(reads, str):
+        if reads.lower() == "auto":
+            curated = curate_dataset(config)
+            available_reads = curated["reads"]
+            target_reads = [available_reads[0]] if available_reads else [1]
+        elif reads.lower() == "all":
+            curated = curate_dataset(config)
+            target_reads = curated["reads"]
+        else:
+            # Parse comma/range string like "2" or "1,3-5"
+            target_reads = CurveFittingConfig._parse_int_list(reads)
     elif isinstance(reads, int):
-        # Single read specified
         target_reads = [reads]
     elif isinstance(reads, list):
-        # Multiple specific reads
-        target_reads = reads
+        target_reads = list(map(int, reads))
     else:
-        raise ValueError(f"Invalid reads parameter: {reads}. Use int, list of ints, 'auto', or 'all'")
+        raise ValueError(f"Invalid reads parameter: {reads}. Use int, list, 'auto', 'all', or comma/range string.")
     
     print(f"  Analyzing reads: {target_reads}")
     
@@ -942,7 +1165,7 @@ def run_complete_analysis(
         
         # Retry logic with alternative models
         retry_count = 0
-        max_retries = 3
+        max_retries = max_attempts
         alternative_models = ['gaussian', 'voigt', 'lorentzian', 'pseudovoigt', 'skewed_gaussian']
         if model_kind in alternative_models:
             alternative_models.remove(model_kind)
@@ -970,7 +1193,7 @@ def run_complete_analysis(
                     x, y, refined_peaks,
                     model_kind=alt_model,
                     r2_target=0.92,
-                    max_attempts=2
+                    max_attempts=max_attempts
                 )
                 
                 if alt_result and alt_result.stats.r2 > best_fit.stats.r2:
@@ -1552,12 +1775,38 @@ class CurveFitting:
 
     def build_wavelengths(self, exemplar_df: pd.DataFrame) -> np.ndarray:
         cfg = self.cfg
+        data_length = len(exemplar_df)
         if cfg.start_wavelength is not None and cfg.end_wavelength is not None and cfg.wavelength_step_size is not None:
-            return np.arange(cfg.start_wavelength, cfg.end_wavelength + cfg.wavelength_step_size, cfg.wavelength_step_size)
+            # Build wavelength array from range, but trim to match actual data length
+            x = np.arange(cfg.start_wavelength, cfg.end_wavelength + cfg.wavelength_step_size, cfg.wavelength_step_size)
+            # Ensure wavelength array matches data length
+            if len(x) > data_length:
+                x = x[:data_length]
+            elif len(x) < data_length:
+                # If shorter, extend with last step
+                last_val = x[-1] if len(x) > 0 else cfg.start_wavelength
+                extension = np.arange(last_val + cfg.wavelength_step_size, 
+                                     last_val + cfg.wavelength_step_size * (data_length - len(x) + 1),
+                                     cfg.wavelength_step_size)
+                x = np.concatenate([x, extension[:data_length - len(x)]])
+            return x
         return self.infer_wavelength_vector(exemplar_df)
 
     def stack_blocks(self, blocks: Dict[int, pd.DataFrame]) -> Tuple[np.ndarray, np.ndarray, List[str], List[int]]:
-        well_sets = [set(map(str, df.columns)) for df in blocks.values()]
+        # Filter out non-well columns (like "Wavelength", "WAVELENGTH", etc.)
+        def is_well_column(col: str) -> bool:
+            col_upper = str(col).strip().upper()
+            # Exclude wavelength-related columns
+            if col_upper in ['WAVELENGTH', 'WAVELENGTH (NM)', 'WAVELENGTH_NM', 'WL']:
+                return False
+            # Only include valid well names (A1-H12 pattern)
+            return bool(re.match(r'^[A-H](?:[1-9]|1[0-2])$', col_upper))
+        
+        well_sets = []
+        for df in blocks.values():
+            well_cols = [str(c) for c in df.columns if is_well_column(str(c))]
+            well_sets.append(set(well_cols))
+        
         common_wells = sorted(set.intersection(*well_sets)) if well_sets else []
         if not common_wells:
             common_wells = sorted(set.union(*well_sets)) if well_sets else []
