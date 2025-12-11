@@ -6,7 +6,10 @@ Write-Host "Setting up SpecTopus environment..." -ForegroundColor Green
 
 
 
-$env:GOOGLE_API_KEY="your-api=key"
+# TODO: Set your Google API key before running (do not commit real keys)
+$env:GOOGLE_API_KEY=""
+# Throttle Gemini calls to reduce RPD spikes (1 second between calls)
+$env:GEMINI_MIN_DELAY_MS="1000"
 
 
 # Verify setup
